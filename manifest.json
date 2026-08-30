@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "piccolo.osk",
+  "name": "Piccolo on-screen keyboard",
+  "version": "0.1.0",
+  "description": "Touch keyboard for the X+ Piccolo in tablet mode: pops up on text-field focus (via fcitx5) or an edge swipe; Ctrl/Alt/Super chords; shared with the lock screen.",
+  "kinds": [
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "Osk.qml"
+  },
+  "author": "piccolo-omarchy"
+}
