@@ -23,11 +23,15 @@ This process owns that name and speaks a tiny line protocol with the QML side:
 Typing does NOT go through fcitx5: its virtual-keyboard forwarding drops the
 modifier state and can't commit keysyms without a keycode (verified on
 fcitx5 5.1.21), so Shift/Ctrl combos never arrive. Instead:
-  * text and named keys are injected with wtype (Wayland virtual keyboard,
-    handles Unicode and arbitrary keysyms);
-  * chords go through ydotool (kernel uinput, so the compositor sees a real
-    keyboard - Super+Enter and friends hit Hyprland binds, Ctrl+C reaches
-    the app). ydotoold runs as a user service; keyd excludes its device.
+  * anything that exists on the US keyboard layout - letters, digits,
+    punctuation (shifted or not), named keys, chords - goes through ydotool
+    (kernel uinput, so every app and the compositor see an ordinary keyboard:
+    Chromium types ",./<>?" correctly, Super+Enter hits Hyprland binds,
+    Ctrl+C reaches the app). ydotoold runs as a user service; keyd is told to
+    ignore its device.
+  * characters outside that layout (é, emoji, ...) fall back to wtype, which
+    builds a custom keymap on the fly. Terminals honour that keymap; Chromium
+    only partly does, which is why wtype is not used for plain punctuation.
 Calls are serialised on one worker thread so key order is kept.
 """
 import json
@@ -226,6 +230,50 @@ class Bridge:
     # evdev codes (xkb keycode - 8) for ydotool.
     MOD_EVDEV = {"shift": 42, "ctrl": 29, "alt": 56, "super": 125}
 
+    # US layout: character -> (evdev code, needs shift).
+    US_KEYS = {}
+    for _row, _base in (("`1234567890-=", 41), ("qwertyuiop[]", 16), ("asdfghjkl;'", 30), ("zxcvbnm,./", 44)):
+        for _i, _c in enumerate(_row):
+            US_KEYS[_c] = (_base + _i if _row[0] != "`" else (41 if _i == 0 else 1 + _i), False)
+    US_KEYS["\\"] = (43, False)
+    US_KEYS[" "] = (57, False)
+    US_KEYS["\n"] = (28, False)
+    US_KEYS["\t"] = (15, False)
+    for _lower, _upper in zip("`1234567890-=[];',./\\", "~!@#$%^&*()_+{}:\"<>?|"):
+        US_KEYS[_upper] = (US_KEYS[_lower][0], True)
+    for _c in "abcdefghijklmnopqrstuvwxyz":
+        US_KEYS[_c.upper()] = (US_KEYS[_c][0], True)
+
+    NAMED_EVDEV = {
+        "BackSpace": 14, "Tab": 15, "Return": 28, "Escape": 1, "space": 57, "Delete": 111,
+        "Left": 105, "Right": 106, "Up": 103, "Down": 108, "Home": 102, "End": 107,
+        "Page_Up": 104, "Page_Down": 109, "Insert": 110,
+    }
+
+    @staticmethod
+    def ydotool_text_argv(text):
+        """A single ydotool invocation typing `text`, or None if a character is
+        not on the US layout (the caller then falls back to wtype)."""
+        seq = []
+        for ch in text:
+            if ch not in Bridge.US_KEYS:
+                return None
+            code, shift = Bridge.US_KEYS[ch]
+            if shift:
+                seq += ["42:1", "%d:1" % code, "%d:0" % code, "42:0"]
+            else:
+                seq += ["%d:1" % code, "%d:0" % code]
+        return ["ydotool", "key", "--key-delay", "6"] + seq
+
+    @staticmethod
+    def ydotool_named_argv(name, mods):
+        code = Bridge.NAMED_EVDEV.get(name)
+        if code is None:
+            return None
+        m = [Bridge.MOD_EVDEV[x] for x in mods if x in Bridge.MOD_EVDEV]
+        seq = ["%d:1" % x for x in m] + ["%d:1" % code, "%d:0" % code] + ["%d:0" % x for x in reversed(m)]
+        return ["ydotool", "key", "--key-delay", "8"] + seq
+
     @staticmethod
     def ydotool_argv(cmd):
         mods = [Bridge.MOD_EVDEV[m] for m in cmd.get("mods", []) if m in Bridge.MOD_EVDEV]
@@ -250,8 +298,22 @@ class Bridge:
         try:
             cmd = json.loads(line)
             kind = cmd.get("cmd")
-            if kind in ("type", "key", "char"):
-                argv = self.wtype_argv(cmd)
+            if kind == "type":
+                argv = self.ydotool_text_argv(cmd["text"]) or self.wtype_argv(cmd)
+                if argv:
+                    self.inject_queue.put(argv)
+            elif kind == "key":
+                argv = self.ydotool_named_argv(cmd["name"], cmd.get("mods", [])) or self.wtype_argv(cmd)
+                if argv:
+                    self.inject_queue.put(argv)
+            elif kind == "char":
+                # A character with modifiers held: a chord on its US-layout key.
+                key = self.US_KEYS.get(cmd["text"])
+                if key:
+                    mods = list(cmd.get("mods", [])) + (["shift"] if key[1] else [])
+                    argv = self.ydotool_argv({"code": key[0] + 8, "mods": mods})
+                else:
+                    argv = self.wtype_argv(cmd)
                 if argv:
                     self.inject_queue.put(argv)
             elif kind == "chord":
