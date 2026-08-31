@@ -101,8 +101,17 @@ class Bridge:
         self.conn = None
         self.preedit = ""
         self.arming = False
+        self.arm_sync = True
+        self.visible = False          # is the QML keyboard on screen
+        self.auto_allowed = False     # may fcitx5 focus events show it right now
+        self.suppress_until = 0.0     # ignore fcitx5 Show/Hide until this monotonic time
+        self.last_inject = 0.0
         self.inject_queue = queue.Queue()
         threading.Thread(target=self.inject_worker, daemon=True).start()
+        # fcitx5 leaves on-screen-keyboard mode as soon as it sees a key from a
+        # real keyboard (see after_inject); while the keyboard is allowed to
+        # auto-show, re-arm now and then so the next focus change reaches us.
+        GLib.timeout_add_seconds(5, self.periodic_arm)
 
     # --- arming ---------------------------------------------------------------
     # Owning the bus name only makes fcitx5 *notice* us. It switches into
@@ -110,10 +119,11 @@ class Bridge:
     # focus-driven Show/Hide - the first time its own ShowVirtualKeyboard
     # service method is called. So call Show and then Hide once, and swallow
     # the pair of callbacks that produces.
-    def arm(self):
+    def arm(self, sync=True):
         if self.conn is None:
             return False
         self.arming = True
+        self.arm_sync = sync
         for method in ("ShowVirtualKeyboard", "HideVirtualKeyboard"):
             self.conn.call(
                 BACKEND_NAME, BACKEND_PATH, SERVICE_IFACE, method, None,
@@ -124,8 +134,33 @@ class Bridge:
 
     def _armed(self):
         self.arming = False
-        emit(event="armed")
-        self.sync_focus()
+        if self.arm_sync:
+            emit(event="armed")
+            self.sync_focus()
+        return False
+
+    def periodic_arm(self):
+        # Only while hidden: while our keyboard is up, after_inject keeps the
+        # mode alive, and arming would needlessly poke fcitx5 on every tick.
+        if self.auto_allowed and not self.visible and not self.arming \
+                and time.monotonic() - self.last_inject > 2:
+            self.arm(sync=False)
+        return True
+
+    # Every key we inject looks like a physical keyboard to fcitx5, which then
+    # hides its virtual keyboard (a HideVirtualKeyboard call to us) and drops
+    # back to physical-keyboard mode, after which focus changes no longer
+    # produce Show calls. So: ignore its Show/Hide for a moment after each
+    # injection, and if our keyboard is on screen tell fcitx5 it is shown
+    # again, which also restores on-screen-keyboard mode.
+    def after_inject(self):
+        self.last_inject = time.monotonic()
+        self.suppress_until = self.last_inject + 0.6
+        if self.visible and self.conn is not None:
+            self.conn.call(
+                BACKEND_NAME, BACKEND_PATH, SERVICE_IFACE, "ShowVirtualKeyboard", None,
+                None, Gio.DBusCallFlags.NONE, 1000, None, None,
+            )
         return False
 
     # fcitx5 only reports focus *transitions*. A field that was already focused
@@ -149,11 +184,12 @@ class Bridge:
     # --- fcitx5 -> us ---------------------------------------------------------
     def on_method_call(self, conn, sender, path, iface, method, params, invocation):
         args = params.unpack() if params is not None else ()
+        swallow = self.arming or time.monotonic() < self.suppress_until
         if method == "ShowVirtualKeyboard":
-            if not self.arming:
+            if not swallow:
                 emit(event="show")
         elif method == "HideVirtualKeyboard":
-            if not self.arming:
+            if not swallow:
                 emit(event="hide")
         elif method == "UpdatePreeditArea":
             self.preedit = args[0]
@@ -162,11 +198,11 @@ class Bridge:
             emit(event="preedit", text=self.preedit, caret=args[0])
         elif method == "NotifyIMActivated":
             emit(event="notify", method=method, args=list(args))
-            if not self.arming:
+            if not swallow:
                 emit(event="show")
         elif method == "NotifyIMDeactivated":
             emit(event="notify", method=method, args=list(args))
-            if not self.arming:
+            if not swallow:
                 emit(event="hide")
         elif method.startswith("Notify"):
             emit(event="notify", method=method, args=list(args))
@@ -293,6 +329,7 @@ class Bridge:
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as exc:
                 emit(event="error", message=str(exc))
+            GLib.idle_add(self.after_inject)
 
     def handle_command(self, line):
         if not line:
@@ -300,6 +337,8 @@ class Bridge:
         try:
             cmd = json.loads(line)
             kind = cmd.get("cmd")
+            if kind in ("type", "key", "char", "chord"):
+                self.suppress_until = time.monotonic() + 0.9
             if kind == "type":
                 argv = self.ydotool_text_argv(cmd["text"]) or self.wtype_argv(cmd)
                 if argv:
@@ -323,7 +362,14 @@ class Bridge:
                 if argv:
                     self.inject_queue.put(argv)
             elif kind == "visible":
-                self.backend_call("ProcessVisibilityEvent", GLib.Variant("(b)", (bool(cmd.get("value")),)))
+                self.visible = bool(cmd.get("value"))
+                self.backend_call("ProcessVisibilityEvent", GLib.Variant("(b)", (self.visible,)))
+            elif kind == "autoAllowed":
+                self.auto_allowed = bool(cmd.get("value"))
+                if self.auto_allowed:
+                    self.arm(sync=False)
+            elif kind == "arm":
+                self.arm(sync=bool(cmd.get("sync", False)))
         except Exception as exc:  # keep the bridge alive on a bad line
             emit(event="error", message=str(exc), line=line)
         return False  # one-shot idle callback

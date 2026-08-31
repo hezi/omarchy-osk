@@ -33,6 +33,9 @@ Item {
   property bool tabletMode: false
   onTabletModeChanged: if (tabletMode) dismissed = false
   readonly property bool autoAllowed: autoShow === "always" || (autoShow === "tablet" && tabletMode)
+  // fcitx5 forgets on-screen-keyboard mode whenever a real key is typed; the
+  // bridge re-arms it while auto-show is allowed (see osk-bridge.py).
+  onAutoAllowedChanged: bridge.sendCmd({ cmd: "autoAllowed", value: autoAllowed })
   readonly property bool shown: pinned || (imWantsKeyboard && autoAllowed && !dismissed)
   property bool mapped: false             // window stays mapped through the slide-out
 
@@ -114,6 +117,7 @@ Item {
     case "ready":
       bridgeReady = true
       bridge.sendCmd({ cmd: "visible", value: shown })
+      bridge.sendCmd({ cmd: "autoAllowed", value: autoAllowed })
       break
     case "show":
       imWantsKeyboard = true
