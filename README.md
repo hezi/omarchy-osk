@@ -12,6 +12,15 @@ Omarchy machine with a touchscreen.
   keyboard, so punctuation works in Chromium and Super binds fire.
 - **Two layers.** `?123` switches to F1–F12, navigation (ins/home/end/page),
   delete, a number block and the symbols without shifting.
+- **22 layouts, 9 languages.** English (QWERTY · Dvorak), Español, Deutsch,
+  Français, עברית, العربية, Ελληνικά, Русский and فارسی — each with a
+  phone-style **Simplified** sibling. Tap the 🌐 globe to cycle, hold it to
+  switch or manage.
+- **Long-press accents.** Hold a key for its alternates — `é è ê`, `¿ ¡`,
+  Greek tonos, Arabic hamza, `ё` — imported from AnySoftKeyboard's layout
+  data plus hand-tuned sets.
+- **Split mode.** iPad-style thumb halves, one toggle away. **Key preview**
+  bubbles are a toggle too.
 - **Space-bar cursor.** Drag along the space bar to move the text cursor.
 - **Dictation.** If [voxtype](https://github.com/dnck/voxtype) is installed a
   microphone key toggles it.
@@ -49,8 +58,7 @@ Toggle it by hand with a keybind (add to `~/.config/hypr/bindings.lua`):
 o.bind("SUPER + SHIFT + K", "Toggle on-screen keyboard", "omarchy-shell osk toggle")
 ```
 
-`Shift` is one-shot; double-tap it for caps lock. Hide the keyboard with the
-⌨ key or by dragging the handle down.
+`Shift` is one-shot; double-tap it for caps lock. Hide the keyboard by dragging the handle down.
 
 ```bash
 omarchy-shell osk state                 # what it's thinking (JSON)
@@ -79,11 +87,15 @@ toggle layouts in or out of the rotation, reorder the cycle, and flip **Split
 keyboard** (iPad-style thumb halves) and **Key preview** (iOS-style bubbles).
 Everything persists in `osk.json`.
 
+![Layout switcher](docs/switcher.png)
+
 Boards are drawn on a 15-unit ANSI grid: staggered modifiers (Tab 1.5u, Caps
 1.75u, Shift 2.25u), letters that absorb leftover width on sparse rows, a
 space bar that is centered by construction, and a ?123 plane with F-keys, a
 true numpad block, arrows, and full punctuation (so every language can type
 `; : ' " < > ? !` even when its letter rows don't carry them).
+
+![Hebrew — Standard SI-1452](docs/hebrew.png)
 
 **Long-press** keys with a dot of extra character(s) for accents and
 alternates — `é è ê ë`, `á í ó ú ü`, Greek tonos, Arabic hamza forms, `ё`,
@@ -93,6 +105,12 @@ sets. Arabic and Persian get native `، ؛ ؟` on the bottom row.
 Every layout automatically ships a **Simplified sibling** — the same letters,
 accents and shift pairs on the phone-style big-key board (per-row widths adapt
 to dense scripts), listed as *… · Simplified* in the picker.
+
+![Simplified](docs/simplified.png)
+
+Split mode puts the same board in two thumb halves:
+
+![Split mode](docs/split.png)
 
 Bundled layouts:
 
@@ -116,6 +134,8 @@ omarchy-shell osk manage                # open the settings panel
 omarchy-shell osk setSplit on           # iPad-style split
 omarchy-shell osk setKeyPreview on      # key preview bubbles
 ```
+
+![Manage layouts](docs/manage.png)
 
 Adding a language is a data-only append to `CATALOG` in `KeyboardLayout.js`
 (letter rows + optional `alts`/`shiftMap`); the builders handle widths,
