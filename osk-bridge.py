@@ -44,6 +44,8 @@ import threading
 import time
 
 import gi
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from osk_engine import Engine
 
 gi.require_version("Gio", "2.0")
 gi.require_version("GLib", "2.0")
@@ -109,6 +111,14 @@ class Bridge:
         self.last_inject = 0.0
         self.inject_queue = queue.Queue()
         threading.Thread(target=self.inject_worker, daemon=True).start()
+        # ---- suggestions / autocorrect / glide typing -----------------------
+        self.engine = Engine(log=lambda *a: emit(event="engine", msg=" ".join(str(x) for x in a)))
+        self.cur_word = ""
+        self.last_commit = None        # word we placed (swipe/autocorrect/pick), for replacement
+        self.feat = {"suggest": False, "autocorrect": False, "glide": False}
+        self.app_ok = True             # autocorrect disabled for terminals
+        self.TERMINALS = {"foot", "footclient", "kitty", "alacritty", "org.wezfurlong.wezterm",
+                          "com.mitchellh.ghostty", "ghostty", "xterm", "st"}
         # fcitx5 leaves on-screen-keyboard mode as soon as it sees a key from a
         # real keyboard (see after_inject); while the keyboard is allowed to
         # auto-show, re-arm now and then so the next focus change reaches us.
@@ -154,6 +164,96 @@ class Bridge:
     # produce Show calls. So: ignore its Show/Hide for a moment after each
     # injection, and if our keyboard is on screen tell fcitx5 it is shown
     # again, which also restores on-screen-keyboard mode.
+    # ---- typing intelligence -------------------------------------------------
+    WORD_CHARS = "'-"
+
+    def inject_text_internal(self, text):
+        self.suppress_until = time.monotonic() + 0.9
+        argv = self.ydotool_text_argv(text) or self.wtype_argv({"cmd": "type", "text": text})
+        if argv:
+            self.inject_queue.put(argv)
+
+    def inject_backspaces(self, n):
+        if n <= 0:
+            return
+        self.suppress_until = time.monotonic() + 0.9
+        self.inject_queue.put(["ydotool", "key", "--key-delay", "4"] + ["14:1", "14:0"] * n)
+
+    def emit_suggest(self):
+        if not self.feat["suggest"]:
+            return
+        cands = self.engine.suggest(self.cur_word) if self.cur_word else []
+        emit(event="suggest", word=self.cur_word, cands=cands)
+
+    def track_char(self, ch):
+        """Follow what the user types; on a space, maybe autocorrect the word.
+        Returns True if the injection was replaced (caller must not inject)."""
+        if not (self.feat["suggest"] or self.feat["autocorrect"]):
+            return False
+        if ch.isalpha() or (ch in self.WORD_CHARS and self.cur_word):
+            self.cur_word += ch
+            self.last_commit = None
+            self.emit_suggest()
+            return False
+        if ch == " ":
+            w, self.cur_word = self.cur_word, ""
+            handled = False
+            if (w and len(w) >= 2 and self.feat["autocorrect"] and self.app_ok
+                    and not w.isupper()):
+                fix = self.engine.correct(w)
+                if fix:
+                    self.inject_backspaces(len(w))
+                    self.inject_text_internal(fix + " ")
+                    self.last_commit = (fix, w)
+                    emit(event="autocorrected", frm=w, to=fix)
+                    handled = True
+            if not handled and w:
+                self.last_commit = None
+            self.emit_suggest()
+            return handled
+        # punctuation, digits, anything else: word boundary, no correction
+        self.cur_word = ""
+        self.emit_suggest()
+        return False
+
+    def track_key(self, name):
+        if not (self.feat["suggest"] or self.feat["autocorrect"]):
+            return
+        if name == "BackSpace":
+            if self.cur_word:
+                self.cur_word = self.cur_word[:-1]
+            else:
+                self.last_commit = None
+        else:
+            self.cur_word = ""
+            self.last_commit = None
+        self.emit_suggest()
+
+    def do_pick(self, word):
+        if self.cur_word:
+            self.inject_backspaces(len(self.cur_word))
+            self.inject_text_internal(word + " ")
+            self.cur_word = ""
+        elif self.last_commit:
+            self.inject_backspaces(len(self.last_commit[0]) + 1)
+            self.inject_text_internal(word + " ")
+        else:
+            self.inject_text_internal(word + " ")
+        self.last_commit = (word, None)
+        self.emit_suggest()
+
+    def do_swipe(self, path):
+        if not self.feat["glide"]:
+            return
+        cands = self.engine.decode_swipe([tuple(p) for p in path])
+        if not cands:
+            return
+        lead = "" if self.cur_word == "" else " "
+        self.cur_word = ""
+        self.inject_text_internal(lead + cands[0] + " ")
+        self.last_commit = (cands[0], None)
+        emit(event="swiped", word=cands[0], cands=cands[1:])
+
     def after_inject(self):
         self.last_inject = time.monotonic()
         self.suppress_until = self.last_inject + 0.6
@@ -367,10 +467,14 @@ class Bridge:
             if kind in ("type", "key", "char", "chord"):
                 self.suppress_until = time.monotonic() + 0.9
             if kind == "type":
-                argv = self.ydotool_text_argv(cmd["text"]) or self.wtype_argv(cmd)
+                text = cmd["text"]
+                if len(text) == 1 and self.track_char(text):
+                    return False          # autocorrect swallowed the space and injected itself
+                argv = self.ydotool_text_argv(text) or self.wtype_argv(cmd)
                 if argv:
                     self.inject_queue.put(argv)
             elif kind == "key":
+                self.track_key(cmd["name"])
                 argv = self.ydotool_named_argv(cmd["name"], cmd.get("mods", [])) or self.wtype_argv(cmd)
                 if argv:
                     self.inject_queue.put(argv)
@@ -385,12 +489,30 @@ class Bridge:
                 if argv:
                     self.inject_queue.put(argv)
             elif kind == "chord":
+                self.cur_word = ""
+                self.last_commit = None
                 argv = self.ydotool_argv(cmd)
                 if argv:
                     self.inject_queue.put(argv)
             elif kind == "visible":
                 self.visible = bool(cmd.get("value"))
                 self.backend_call("ProcessVisibilityEvent", GLib.Variant("(b)", (self.visible,)))
+            elif kind == "lang":
+                self.engine.set_lang(cmd.get("value", "english"),
+                    on_ready=lambda l, n: emit(event="dict", lang=l, words=n))
+            elif kind == "keymap":
+                self.engine.set_keymap(cmd.get("keys", {}), cmd.get("unit", 60))
+            elif kind == "features":
+                for k in ("suggest", "autocorrect", "glide"):
+                    if k in cmd:
+                        self.feat[k] = bool(cmd[k])
+                self.emit_suggest()
+            elif kind == "appclass":
+                self.app_ok = str(cmd.get("value", "")).lower() not in self.TERMINALS
+            elif kind == "swipe":
+                self.do_swipe(cmd.get("path", []))
+            elif kind == "pick":
+                self.do_pick(str(cmd.get("word", "")))
             elif kind == "autoAllowed":
                 self.auto_allowed = bool(cmd.get("value"))
                 if self.auto_allowed:

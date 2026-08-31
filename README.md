@@ -19,6 +19,10 @@ Omarchy machine with a touchscreen.
 - **Long-press accents.** Hold a key for its alternates — `é è ê`, `¿ ¡`,
   Greek tonos, Arabic hamza, `ё` — imported from AnySoftKeyboard's layout
   data plus hand-tuned sets.
+- **Glide typing, suggestions and autocorrect.** Swipe across the letters to
+  write a word (a comet trail follows your finger), tap candidates in the
+  strip above the keys, and let the space bar fix typos — with per-language
+  dictionaries fetched on first use. Autocorrect stays out of terminals.
 - **Split mode.** iPad-style thumb halves, one toggle away. **Key preview**
   bubbles are a toggle too.
 - **Space-bar cursor.** Drag along the space bar to move the text cursor.
@@ -141,6 +145,38 @@ Adding a language is a data-only append to `CATALOG` in `KeyboardLayout.js`
 (letter rows + optional `alts`/`shiftMap`); the builders handle widths,
 stagger and balance. PRs welcome.
 
+## Suggestions, autocorrect & glide typing
+
+A strip above the keys shows up to three candidates as you type — tap one to
+replace the word you're on (the first, highlighted one is the best match).
+
+**Autocorrect** fires when you hit space: the word is scored against the
+dictionary with a keyboard-aware edit distance (substituting an adjacent key
+is cheap, a transposition cheaper still), so `teh` → `the` and `keybaord` →
+`keyboard`. It skips ALL-CAPS words, and turns itself off while a terminal is
+focused (foot, kitty, alacritty, wezterm, ghostty, xterm, st) so `gti` stays
+`gti`. After a correction the strip shows what you actually typed — tap it to
+undo.
+
+**Glide typing** lets you swipe a word instead of tapping it: slide across the
+letters and lift; the decoder matches the path's shape against the dictionary
+and commits the best word plus a space, with runners-up in the strip. A trail
+follows your finger while you swipe. Tap-typing still works exactly as before
+— short taps stay taps.
+
+Dictionaries come from AnySoftKeyboard's language packs, one per language, and
+are downloaded automatically the first time a layout in that language becomes
+active (a few MB each, cached under `~/.config/omarchy/osk/dict/`). All nine
+bundled languages have one; the dictionary always follows the active layout.
+
+All three are toggles in the manage panel, or:
+
+```bash
+omarchy-shell osk setSuggest on
+omarchy-shell osk setAutocorrect on
+omarchy-shell osk setGlide on
+```
+
 ## Pop-up on focus (fcitx5)
 
 Focus detection uses fcitx5's DBus virtual-keyboard backend, so it needs
@@ -174,6 +210,12 @@ a clone of the lock plugin, not this one.
 - **Layering.** The keyboard is a `WlrLayer.Overlay` surface with
   `keyboardFocus: None`, so it never covers-under a fullscreen window and never
   steals focus from the field you're typing into.
+- **Words.** `osk_engine.py` holds the language model: prefix suggestions from
+  a frequency lexicon, autocorrect via keyboard-adjacency-weighted
+  Damerau-Levenshtein distance, and SHARK²-style glide decoding (the swipe
+  path is resampled and scored on shape + key locations + word frequency).
+  The bridge tracks the current word from the keys it injects — nothing reads
+  what other keyboards type.
 
 ## Files
 
@@ -181,7 +223,8 @@ a clone of the lock plugin, not this one.
 Osk.qml            desktop wrapper: visibility, swipe strip, IPC, bridge plumbing
 KeyboardView.qml   the key surface (rows, layers, modifiers) — shareable
 KeyboardLayout.js  the two key layers
-osk-bridge.py      fcitx5 D-Bus bridge + ydotool/wtype injection
+osk-bridge.py      fcitx5 D-Bus bridge + ydotool/wtype injection + word tracking
+osk_engine.py      suggestions, autocorrect, glide decoding, dictionary fetch
 setup.sh           one-time dependency install
 check-deps.sh      dependency probe / first-run nag
 manifest.json      Omarchy plugin manifest

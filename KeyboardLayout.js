@@ -19,7 +19,7 @@ var unitsPerRow = 15;
 var GLYPH = {
   close: String.fromCodePoint(0xF030F),
   mic:   String.fromCodePoint(0xF036C),
-  globe: String.fromCodePoint(0xF0454)
+  globe: String.fromCodePoint(0xF059F)
 };
 
 // physical key codes (xkb = evdev+8), by QWERTY position (+ the [ ] ; ' , . tails)

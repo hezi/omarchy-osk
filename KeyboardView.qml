@@ -46,6 +46,61 @@ Rectangle {
   property bool settingsOpen: false
   signal rosterEdited(var ids)
   signal prefToggled(string name, bool on)
+  signal suggestionPicked(string word)
+  signal swipeCaptured(var path)
+
+  // ---- suggestions / glide typing ---------------------------------------------------
+  property bool suggestEnabled: false
+  property bool glideEnabled: false
+  property bool autocorrectEnabled: false
+  property var suggestions: []          // words for the strip
+  readonly property int stripH: suggestEnabled ? Math.round(rowHeight * 0.62) : 0
+  property var overlayPressedDef: null  // key under the finger while the glide overlay owns input
+
+  // Geometry of the letter rows (for the glide overlay + the decoder's keymap)
+  readonly property real keysTop: handleHeight + stripH + padY
+  function rowGeom(i) { return keysTop + i * (rowHeight + gap) }
+  function letterRowSpan() {
+    var lo = -1, hi = -1
+    for (var i = 0; i < displayRows.length; i++) {
+      var letters = 0
+      for (var j = 0; j < displayRows[i].length; j++) if (displayRows[i][j].letter) letters++
+      if (letters >= 3) { if (lo < 0) lo = i; hi = i }
+    }
+    return lo < 0 ? null : { top: rowGeom(lo), bottom: rowGeom(hi) + rowHeight }
+  }
+  function rowLayoutInfo(row) {
+    var total = 0
+    for (var j = 0; j < row.length; j++) total += keyWidth(row[j].w) + (j ? gap : 0)
+    return { start: (width - total) / 2, total: total }
+  }
+  function keyDefAt(x, y) {
+    for (var i = 0; i < displayRows.length; i++) {
+      var top = rowGeom(i)
+      if (y < top || y > top + rowHeight) continue
+      var row = displayRows[i], info = rowLayoutInfo(row), ax = info.start
+      for (var j = 0; j < row.length; j++) {
+        var kw = keyWidth(row[j].w)
+        if (x >= ax && x <= ax + kw) return row[j]
+        ax += kw + gap
+      }
+    }
+    return null
+  }
+  // Letter-key centers for the swipe decoder, in this item's coordinates.
+  function letterKeymap() {
+    var keys = {}
+    for (var i = 0; i < displayRows.length; i++) {
+      var row = displayRows[i], info = rowLayoutInfo(row), ax = info.start
+      var yc = rowGeom(i) + rowHeight / 2
+      for (var j = 0; j < row.length; j++) {
+        var kw = keyWidth(row[j].w)
+        if (row[j].letter && row[j].label) keys[row[j].label.toLowerCase()] = [ax + kw / 2, yc]
+        ax += kw + gap
+      }
+    }
+    return { keys: keys, unit: unit }
+  }
 
   // ---- split (iPad-style thumb) mode ----------------------------------------------
   property bool splitMode: false
@@ -136,17 +191,19 @@ Rectangle {
   property real altX: 0
   property real altY: 0
   property bool altOpen: false
-  function openAlts(keyItem, def) {
+  function openAltsAt(pos, def, retract) {
     if (!def.alts) return
-    // the base character was typed on press - retract it, the user is choosing
-    keyAction({ kind: "key", name: "BackSpace", code: 22 })
+    if (retract) keyAction({ kind: "key", name: "BackSpace", code: 22 })
     var chars = def.alts.split("")
     altKeys = chars
-    var pos = keyItem.mapToItem(root, keyItem.width / 2, 0)
     var w = chars.length * rowHeight * 0.95 + (chars.length - 1) * gap
     altX = Math.max(padX, Math.min(pos.x - w / 2, width - padX - w))
     altY = pos.y - rowHeight * 1.05
     altOpen = true
+  }
+  function openAlts(keyItem, def) {
+    // the base character was typed on press - retract it, the user is choosing
+    openAltsAt(keyItem.mapToItem(root, keyItem.width / 2, 0), def, true)
   }
   function pickAlt(c) {
     var t = (shift || capsLock) ? c.toUpperCase() : c
@@ -169,7 +226,7 @@ Rectangle {
   readonly property real unit: Math.max(1, (width - 2 * padX - (effUnits - 1) * gap) / effUnits)
   readonly property int rowHeight: Math.max(40, Math.min(58, Math.round(unit * 0.95)))
 
-  implicitHeight: handleHeight + padY * 2 + rows.length * rowHeight + (rows.length - 1) * gap
+  implicitHeight: handleHeight + stripH + padY * 2 + rows.length * rowHeight + (rows.length - 1) * gap
   color: Color.popups.background
 
   function keyWidth(units) {
@@ -288,9 +345,40 @@ Rectangle {
     }
   }
 
+  // ---- suggestion strip -------------------------------------------------------------
+  Row {
+    id: strip
+    visible: root.suggestEnabled
+    anchors { top: handle.bottom; horizontalCenter: parent.horizontalCenter }
+    height: root.stripH
+    spacing: Style.space(18)
+    Repeater {
+      model: root.suggestions
+      Rectangle {
+        required property var modelData
+        required property int index
+        width: Math.max(candText.implicitWidth + Style.space(24), root.rowHeight * 1.6)
+        height: root.stripH
+        radius: Style.cornerRadius
+        color: candTap.pressed ? Util.alpha(Color.accent, 0.35)
+             : index === 0 ? Util.alpha(Color.popups.text, 0.10) : "transparent"
+        Text {
+          id: candText
+          anchors.centerIn: parent
+          text: modelData
+          color: index === 0 ? Color.popups.text : Util.alpha(Color.popups.text, 0.75)
+          font.family: Style.font.family
+          font.pixelSize: Math.round(root.stripH * 0.52)
+          font.bold: index === 0
+        }
+        TapHandler { id: candTap; onTapped: root.suggestionPicked(modelData) }
+      }
+    }
+  }
+
   Column {
     anchors { top: handle.bottom; horizontalCenter: parent.horizontalCenter }
-    anchors.topMargin: root.padY
+    anchors.topMargin: root.padY + root.stripH
     spacing: root.gap
 
     Repeater {
@@ -310,6 +398,154 @@ Rectangle {
           }
         }
       }
+    }
+  }
+
+  // ---- glide trail ------------------------------------------------------------------
+  // A tapered stroke that follows the finger while swiping and fades on lift.
+  Canvas {
+    id: trailCanvas
+    anchors.fill: parent
+    visible: root.glideEnabled
+    z: 45
+    renderStrategy: Canvas.Threaded
+    property var pts: []
+    onPaint: {
+      var ctx = getContext("2d")
+      ctx.reset()
+      var n = pts.length
+      if (n < 2) return
+      ctx.lineCap = "round"
+      ctx.lineJoin = "round"
+      // Taper via nested suffix strokes: each pass is one continuous polyline
+      // (a single stroke never overlaps its own joints), so translucent caps
+      // can't stack into dots at the sample points the way per-segment
+      // strokes do — Qt's antialiased cap edges bead visibly even under
+      // destination-over.
+      var a = Color.accent
+      var bands = [
+        { from: 0,                     alpha: 0.14, w: 0.09 },
+        { from: Math.floor(n / 3),     alpha: 0.22, w: 0.13 },
+        { from: Math.floor(2 * n / 3), alpha: 0.30, w: 0.17 }
+      ]
+      for (var b = 0; b < bands.length; b++) {
+        var s = Math.min(bands[b].from, n - 2)
+        ctx.strokeStyle = Qt.rgba(a.r, a.g, a.b, bands[b].alpha)
+        ctx.lineWidth = root.rowHeight * bands[b].w
+        ctx.beginPath()
+        ctx.moveTo(pts[s][0], pts[s][1])
+        for (var i = s + 1; i < n; i++) ctx.lineTo(pts[i][0], pts[i][1])
+        ctx.stroke()
+      }
+    }
+    // Stay at opacity 0 until the clearing repaint has landed (painting is
+    // threaded), otherwise the old trail pops back for a frame at full opacity.
+    property bool clearing: false
+    onPainted: if (clearing) { clearing = false; opacity = 1 }
+    NumberAnimation {
+      id: trailFade
+      target: trailCanvas
+      property: "opacity"
+      to: 0
+      duration: 240
+      onStopped: {
+        trailCanvas.pts = []
+        trailCanvas.clearing = true
+        trailCanvas.requestPaint()
+      }
+    }
+    function begin() { trailFade.stop(); clearing = false; opacity = 1; pts = []; requestPaint() }
+    function push(p) {
+      // Skip jitter below ~2.5px so we don't repaint on every raw touch event.
+      if (pts.length) {
+        var l = pts[pts.length - 1]
+        var dx = p[0] - l[0], dy = p[1] - l[1]
+        if (dx * dx + dy * dy < 6.25) return
+      }
+      pts.push(p)
+      if (pts.length > 28) pts.shift()
+      requestPaint()
+    }
+    function finish() { if (pts.length) trailFade.restart(); }
+  }
+
+  // ---- glide (swipe-typing) overlay over the letter rows ----------------------------
+  // While glide is on, letter-area keys type on RELEASE so a drag can become a
+  // swipe instead. Tap, long-press alternates and key-repeat are re-implemented
+  // here; the key under the finger still lights up via overlayPressedDef.
+  MouseArea {
+    id: glide
+    visible: root.glideEnabled && root.keyLayer === "base" && !root.pickerOpen && !root.settingsOpen
+    enabled: visible
+    readonly property var span: visible ? root.letterRowSpan() : null
+    anchors.left: parent.left
+    anchors.right: parent.right
+    y: span ? span.top : 0
+    height: span ? span.bottom - span.top : 0
+    z: 40
+    preventStealing: true
+    property var path: []
+    property real dist: 0
+    property bool swiping: false
+    property var pressDef: null
+    property point pressPos: Qt.point(0, 0)
+    property bool altsShown: false
+    function localToRoot(px, py) { return Qt.point(px, py + y) }
+    onPressed: function(m) {
+      trailCanvas.begin()
+      path = [[m.x, m.y + y]]
+      dist = 0; swiping = false; altsShown = false
+      pressPos = Qt.point(m.x, m.y)
+      pressDef = root.keyDefAt(m.x, m.y + y)
+      root.overlayPressedDef = pressDef
+      if (pressDef && (pressDef.alts || pressDef.repeat)) glideHold.restart()
+    }
+    onPositionChanged: function(m) {
+      if (!pressed) return
+      var p = [m.x, m.y + y]
+      var last = path[path.length - 1]
+      dist += Math.hypot(p[0] - last[0], p[1] - last[1])
+      path.push(p)
+      if (!swiping && dist > root.rowHeight * 0.7) {
+        swiping = true
+        glideHold.stop(); glideRepeat.stop()
+        root.overlayPressedDef = null
+        for (var i = 0; i < path.length; i++) trailCanvas.push(path[i])
+      } else if (swiping) {
+        trailCanvas.push(p)
+      }
+    }
+    onReleased: {
+      glideHold.stop(); glideRepeat.stop()
+      trailCanvas.finish()
+      root.overlayPressedDef = null
+      if (swiping && pressDef && pressDef.letter) {
+        root.swipeCaptured(path)
+      } else if (!swiping && pressDef && !altsShown) {
+        root.pressKey(pressDef)
+      }
+      pressDef = null
+    }
+    onCanceled: { glideHold.stop(); glideRepeat.stop(); trailCanvas.finish(); root.overlayPressedDef = null; pressDef = null }
+    Timer {
+      id: glideHold
+      interval: 380
+      onTriggered: {
+        if (glide.swiping || !glide.pressDef) return
+        if (glide.pressDef.alts) {
+          glide.altsShown = true
+          root.openAltsAt(glide.localToRoot(glide.pressPos.x, glide.pressPos.y), glide.pressDef, false)
+        } else if (glide.pressDef.repeat) {
+          root.pressKey(glide.pressDef)
+          glideRepeat.start()
+        }
+      }
+    }
+    Timer {
+      id: glideRepeat
+      interval: 55
+      repeat: true
+      onTriggered: if (glide.pressDef) root.pressKey(glide.pressDef)
     }
   }
 
@@ -481,18 +717,8 @@ Rectangle {
       }
     }
 
-    Row {
-      id: prefRow
-      anchors { top: setHead.bottom; left: parent.left; right: parent.right }
-      anchors.margins: root.padX
-      height: Math.round(root.rowHeight * 0.8)
-      spacing: root.gap
-      PrefToggle { label: "Split keyboard"; on: root.splitMode; onToggledPref: root.prefToggled("split", !on) }
-      PrefToggle { label: "Key preview"; on: root.keyPreview; onToggledPref: root.prefToggled("preview", !on) }
-    }
-
     Flickable {
-      anchors { top: prefRow.bottom; left: parent.left; right: parent.right; bottom: parent.bottom }
+      anchors { top: setHead.bottom; left: parent.left; right: parent.right; bottom: parent.bottom }
       anchors.margins: root.padX
       anchors.topMargin: Math.round(root.gap * 1.2)
       contentHeight: setCol.implicitHeight
@@ -502,6 +728,18 @@ Rectangle {
         id: setCol
         width: parent.width
         spacing: Math.round(root.gap * 0.7)
+        Grid {
+          id: prefRow
+          width: setCol.width
+          columns: 2
+          columnSpacing: root.gap
+          rowSpacing: root.gap
+          PrefToggle { label: "Split keyboard"; on: root.splitMode; onToggledPref: root.prefToggled("split", !on) }
+          PrefToggle { label: "Key preview"; on: root.keyPreview; onToggledPref: root.prefToggled("preview", !on) }
+          PrefToggle { label: "Suggestions"; on: root.suggestEnabled; onToggledPref: root.prefToggled("suggest", !on) }
+          PrefToggle { label: "Autocorrect"; on: root.autocorrectEnabled; onToggledPref: root.prefToggled("autocorrect", !on) }
+          PrefToggle { label: "Glide typing"; on: root.glideEnabled; onToggledPref: root.prefToggled("glide", !on) }
+        }
         Repeater {
           model: root.catalogGrouped
           Item {
@@ -586,8 +824,8 @@ Rectangle {
     property string label: ""
     property bool on: false
     signal toggledPref()
-    width: (parent.width - parent.spacing) / 2
-    height: parent.height
+    width: (parent.width - parent.columnSpacing) / 2
+    height: Math.round(root.rowHeight * 0.72)
     radius: Style.cornerRadius
     color: on ? Util.alpha(Color.accent, 0.14) : Util.alpha(Color.popups.text, 0.05)
     Text {
@@ -624,7 +862,7 @@ Rectangle {
     readonly property bool active: isMod && root.modifierActive(def.id)
     readonly property bool isSpace: def.id === "space"
     property bool spaceDown: false
-    readonly property bool down: tap.pressed || spaceDown
+    readonly property bool down: tap.pressed || spaceDown || root.overlayPressedDef === def
     // Word labels (esc, ctrl, alt, super) read better small; glyphs and characters large.
     readonly property bool wordLabel: (def.label || "").length > 2
 

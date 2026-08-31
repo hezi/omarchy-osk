@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import Quickshell.Hyprland
 import qs.Commons
 import "KeyboardLayout.js" as Layout
 
@@ -29,6 +30,43 @@ Item {
   property var enabledLayouts: Layout.defaultEnabled   // ids in the globe cycle
   property bool keyPreview: false
   property bool splitKeyboard: false
+  property bool suggestOn: true
+  property bool autocorrectOn: true
+  property bool glideOn: true
+
+  // layout id -> AnySoftKeyboard dictionary language
+  function dictFor(id) {
+    var base = id.replace(/-simple$/, "")
+    if (base.indexOf("en-") === 0) return "english"
+    if (base.indexOf("es-") === 0) return "spain"
+    if (base.indexOf("de-") === 0) return "german"
+    if (base.indexOf("fr-") === 0) return "french"
+    if (base === "he-standard" || base === "ask-hebrew") return "hebrew"
+    if (base === "ask-arabic") return "arabic"
+    if (base === "ask-greek") return "greek"
+    if (base === "ask-russian2") return "russian2"
+    if (base === "ask-persian") return "persian"
+    return "english"
+  }
+  function sendFeatures() {
+    bridge.sendCmd({ cmd: "features", suggest: suggestOn, autocorrect: autocorrectOn, glide: glideOn })
+  }
+  function sendLang() { bridge.sendCmd({ cmd: "lang", value: dictFor(keyLayout) }) }
+  function sendKeymap() {
+    var km = keyboard.letterKeymap()
+    bridge.sendCmd({ cmd: "keymap", keys: km.keys, unit: km.unit })
+  }
+  Timer { id: keymapDebounce; interval: 350; onTriggered: root.sendKeymap() }
+
+  // autocorrect is poison in a terminal; follow the focused window's class
+  Connections {
+    target: Hyprland
+    function onRawEvent(event) {
+      if (String(event && event.name ? event.name : "") !== "activewindow") return
+      var cls = String(event.data || "").split(",")[0]
+      bridge.sendCmd({ cmd: "appclass", value: cls })
+    }
+  }
   readonly property string settingsPath: Quickshell.env("HOME") + "/.config/omarchy/osk.json"
 
   // ---- visibility state ------------------------------------------------------
@@ -37,7 +75,11 @@ Item {
   property bool dismissed: false          // hide key pressed while the field kept focus
   property bool tabletMode: false
   onTabletModeChanged: if (tabletMode) dismissed = false
-  onKeyLayoutChanged: if (keyLayout !== "" && keyboard.keyLayout !== keyLayout) keyboard.keyLayout = keyLayout
+  onKeyLayoutChanged: {
+    if (keyLayout !== "" && keyboard.keyLayout !== keyLayout) keyboard.keyLayout = keyLayout
+    keymapDebounce.restart()
+    sendLang()
+  }
   onEnabledLayoutsChanged: keyboard.enabledLayouts = enabledLayouts
   readonly property bool autoAllowed: autoShow === "always" || (autoShow === "tablet" && tabletMode)
   // fcitx5 forgets on-screen-keyboard mode whenever a real key is typed; the
@@ -137,6 +179,18 @@ Item {
       bridgeReady = true
       bridge.sendCmd({ cmd: "visible", value: shown })
       bridge.sendCmd({ cmd: "autoAllowed", value: autoAllowed })
+      sendFeatures()
+      sendLang()
+      keymapDebounce.restart()
+      break
+    case "suggest":
+      keyboard.suggestions = msg.cands || []
+      break
+    case "swiped":
+      keyboard.suggestions = msg.cands || []
+      break
+    case "autocorrected":
+      keyboard.suggestions = msg.frm ? [msg.frm] : []
       break
     case "show":
       imWantsKeyboard = true
@@ -198,12 +252,17 @@ Item {
         keyLayout = enabledLayouts[0] || Layout.defaultLayout
       if (typeof s.keyPreview === "boolean") keyPreview = s.keyPreview
       if (typeof s.split === "boolean") splitKeyboard = s.split
+      if (typeof s.suggest === "boolean") suggestOn = s.suggest
+      if (typeof s.autocorrect === "boolean") autocorrectOn = s.autocorrect
+      if (typeof s.glide === "boolean") glideOn = s.glide
+      sendFeatures()
     } catch (e) {}
   }
 
   function saveSettings() {
     var json = JSON.stringify({ autoShow: autoShow, swipe: swipeEnabled, layout: keyLayout,
-      enabled: enabledLayouts, keyPreview: keyPreview, split: splitKeyboard }, null, 2)
+      enabled: enabledLayouts, keyPreview: keyPreview, split: splitKeyboard,
+      suggest: suggestOn, autocorrect: autocorrectOn, glide: glideOn }, null, 2)
     Util.execArgv(["sh", "-c", 'printf "%s\\n" "$1" > "$2"', "_", json, settingsPath])
   }
 
@@ -219,7 +278,8 @@ Item {
         textFieldFocused: root.imWantsKeyboard, autoShow: root.autoShow,
         swipe: root.swipeEnabled, bridge: root.bridgeReady, dictation: root.dictationAvailable,
         layer: keyboard.keyLayer, layout: keyboard.keyLayout,
-        enabled: root.enabledLayouts, keyPreview: root.keyPreview, split: root.splitKeyboard
+        enabled: root.enabledLayouts, keyPreview: root.keyPreview, split: root.splitKeyboard,
+        suggest: root.suggestOn, autocorrect: root.autocorrectOn, glide: root.glideOn
       })
     }
     function layouts(): string {
@@ -244,6 +304,18 @@ Item {
       keyboard.keyLayer = l; return "ok"
     }
     function switcher(): string { keyboard.pickerOpen = true; return "ok" }
+    function setSuggest(on: string): string {
+      root.suggestOn = (on === "1" || on === "true" || on === "on"); root.sendFeatures(); root.saveSettings()
+      return root.suggestOn ? "on" : "off"
+    }
+    function setAutocorrect(on: string): string {
+      root.autocorrectOn = (on === "1" || on === "true" || on === "on"); root.sendFeatures(); root.saveSettings()
+      return root.autocorrectOn ? "on" : "off"
+    }
+    function setGlide(on: string): string {
+      root.glideOn = (on === "1" || on === "true" || on === "on"); root.sendFeatures(); root.saveSettings()
+      return root.glideOn ? "on" : "off"
+    }
     function setSplit(on: string): string {
       root.splitKeyboard = (on === "1" || on === "true" || on === "on")
       root.saveSettings()
@@ -302,6 +374,14 @@ Item {
       enabledLayouts: root.enabledLayouts
       keyPreview: root.keyPreview
       splitMode: root.splitKeyboard
+      suggestEnabled: root.suggestOn
+      autocorrectEnabled: root.autocorrectOn
+      glideEnabled: root.glideOn
+      onKeyLayerChanged: keymapDebounce.restart()
+      onSplitModeChanged: keymapDebounce.restart()
+      onWidthChanged: keymapDebounce.restart()
+      onSuggestionPicked: function(w) { bridge.sendCmd({ cmd: "pick", word: w }) }
+      onSwipeCaptured: function(p) { bridge.sendCmd({ cmd: "swipe", path: p }) }
       onKeyAction: function(a) { root.handleAction(a) }
       onDismissRequested: root.close()
       onDictationRequested: root.toggleDictation()
@@ -310,6 +390,10 @@ Item {
       onPrefToggled: function(name, on) {
         if (name === "split") root.splitKeyboard = on
         else if (name === "preview") root.keyPreview = on
+        else if (name === "suggest") root.suggestOn = on
+        else if (name === "autocorrect") root.autocorrectOn = on
+        else if (name === "glide") root.glideOn = on
+        root.sendFeatures()
         root.saveSettings()
       }
       Component.onCompleted: if (root.keyLayout !== "") keyLayout = root.keyLayout
