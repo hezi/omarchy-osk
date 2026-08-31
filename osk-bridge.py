@@ -37,6 +37,7 @@ Calls are serialised on one worker thread so key order is kept.
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -163,6 +164,32 @@ class Bridge:
             )
         return False
 
+    # fcitx5 fires a Show whenever a text-capable client takes focus - including
+    # the shell's OWN popups (a bar popup that grabs keyboard focus for its key
+    # navigation, like the tablet panel, focuses `program:quickshell`). That is
+    # never something to type into with this keyboard, so ignore a Show whose
+    # focused input context belongs to the shell.
+    SHELL_PROGRAMS = ("quickshell",)
+
+    def shell_has_focus(self):
+        if self.conn is None:
+            return False
+        try:
+            reply = self.conn.call_sync(
+                BACKEND_NAME, "/controller", "org.fcitx.Fcitx.Controller1", "DebugInfo",
+                None, None, Gio.DBusCallFlags.NONE, 500, None,
+            )
+            info = reply.unpack()[0]
+        except Exception:
+            return False
+        # Find the line of the focused IC and read its program.
+        for line in info.splitlines():
+            if "focus:1" not in line:
+                continue
+            m = re.search(r"program:(\S+)", line)
+            return bool(m and m.group(1) in self.SHELL_PROGRAMS)
+        return False
+
     # fcitx5 only reports focus *transitions*. A field that was already focused
     # when this bridge started (the terminal you were typing in, say) would
     # never be reported until focus left and came back - so after arming, ask
@@ -176,7 +203,7 @@ class Bridge:
                 None, None, Gio.DBusCallFlags.NONE, 1000, None,
             )
             info = reply.unpack()[0]
-            focused = "focus:1" in info
+            focused = "focus:1" in info and not self.shell_has_focus()
             emit(event="show" if focused else "hide", source="sync")
         except Exception as exc:
             emit(event="error", message="sync_focus: %s" % exc)
@@ -186,7 +213,7 @@ class Bridge:
         args = params.unpack() if params is not None else ()
         swallow = self.arming or time.monotonic() < self.suppress_until
         if method == "ShowVirtualKeyboard":
-            if not swallow:
+            if not swallow and not self.shell_has_focus():
                 emit(event="show")
         elif method == "HideVirtualKeyboard":
             if not swallow:
@@ -198,7 +225,7 @@ class Bridge:
             emit(event="preedit", text=self.preedit, caret=args[0])
         elif method == "NotifyIMActivated":
             emit(event="notify", method=method, args=list(args))
-            if not swallow:
+            if not swallow and not self.shell_has_focus():
                 emit(event="show")
         elif method == "NotifyIMDeactivated":
             emit(event="notify", method=method, args=list(args))
