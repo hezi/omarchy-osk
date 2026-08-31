@@ -248,6 +248,8 @@ class Bridge:
         "BackSpace": 14, "Tab": 15, "Return": 28, "Escape": 1, "space": 57, "Delete": 111,
         "Left": 105, "Right": 106, "Up": 103, "Down": 108, "Home": 102, "End": 107,
         "Page_Up": 104, "Page_Down": 109, "Insert": 110,
+        "F1": 59, "F2": 60, "F3": 61, "F4": 62, "F5": 63, "F6": 64, "F7": 65, "F8": 66,
+        "F9": 67, "F10": 68, "F11": 87, "F12": 88, "Print": 99, "Menu": 127,
     }
 
     @staticmethod

@@ -67,6 +67,19 @@ Item {
     }
   }
 
+  // ---- dictation (voxtype) -------------------------------------------------------
+  // The keyboard grows a microphone key when voxtype is installed; it toggles
+  // recording the same way the Pause key does in laptop mode.
+  property bool dictationAvailable: false
+  Process {
+    command: ["sh", "-c", "command -v voxtype >/dev/null 2>&1 && echo yes || echo no"]
+    running: true
+    stdout: SplitParser { onRead: function(line) { root.dictationAvailable = String(line).trim() === "yes" } }
+  }
+  function toggleDictation() {
+    if (dictationAvailable) Util.execArgv(["voxtype", "record", "toggle"])
+  }
+
   // ---- bridge to fcitx5 / injectors ---------------------------------------------
   readonly property string bridgePath: Qt.resolvedUrl("osk-bridge.py").toString().replace(/^file:\/\//, "")
   property bool bridgeReady: false
@@ -167,7 +180,8 @@ Item {
       return JSON.stringify({
         shown: root.shown, pinned: root.pinned, tabletMode: root.tabletMode,
         textFieldFocused: root.imWantsKeyboard, autoShow: root.autoShow,
-        swipe: root.swipeEnabled, bridge: root.bridgeReady
+        swipe: root.swipeEnabled, bridge: root.bridgeReady, dictation: root.dictationAvailable,
+        layer: keyboard.keyLayer
       })
     }
     function setAutoShow(mode: string): string {
@@ -208,8 +222,10 @@ Item {
       width: parent.width
       height: implicitHeight
       y: root.shown ? 0 : height
+      showDictation: root.dictationAvailable
       onKeyAction: function(a) { root.handleAction(a) }
       onDismissRequested: root.close()
+      onDictationRequested: root.toggleDictation()
 
       Behavior on y {
         NumberAnimation { duration: 200; easing.type: Easing.OutCubic }

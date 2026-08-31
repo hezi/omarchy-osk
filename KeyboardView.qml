@@ -8,7 +8,11 @@ import "KeyboardLayout.js" as Layout
 //   { kind: "text",  text: "H" }                       printable, already shifted
 //   { kind: "key",   name: "Return", code: 36 }         named key, no modifiers
 //   { kind: "chord", code: 54, mods: ["ctrl"], label: "c", name: undefined }
-// and `dismissRequested` for the hide key / a downward drag on the handle.
+// and `dismissRequested` for the hide key / a downward drag on the handle,
+// `dictationRequested` for the microphone key (shown when `showDictation`).
+//
+// Two layers (`keyLayer`: "base" | "symbols"), switched with the ?123 / abc key.
+// Dragging a finger along the space bar moves the text cursor.
 //
 // Used by Osk.qml (tablet keyboard, injects into apps) and by the lock
 // screen clone (feeds the password field directly). Styled purely from the
@@ -18,6 +22,12 @@ Rectangle {
 
   signal keyAction(var action)
   signal dismissRequested()
+  signal dictationRequested()
+
+  // ---- layers ---------------------------------------------------------------------
+  property string keyLayer: "base"         // base | symbols
+  readonly property var rows: Layout.layers[keyLayer] || Layout.base
+  property bool showDictation: false
 
   // ---- modifier state ----------------------------------------------------------
   property bool shift: false
@@ -31,15 +41,21 @@ Rectangle {
     shift = false; capsLock = false; ctrl = false; alt = false; superMod = false
   }
 
+  // Space-bar drag: one cursor step per `step` px.
+  function moveCursor(dir) {
+    keyAction({ kind: "key", name: dir > 0 ? "Right" : "Left", code: dir > 0 ? 114 : 113 })
+  }
+
   // ---- geometry ------------------------------------------------------------------
   readonly property int padX: Style.space(6)
   readonly property int padY: Style.space(6)
   readonly property int gap: Style.space(5)
   readonly property int handleHeight: Style.space(12)
-  readonly property real unit: Math.max(1, (width - 2 * padX - (Layout.maxKeysPerRow - 1) * gap) / Layout.unitsPerRow)
+  // A row of n units has n - 1 gaps between them, so this fits exactly.
+  readonly property real unit: Math.max(1, (width - 2 * padX - (Layout.unitsPerRow - 1) * gap) / Layout.unitsPerRow)
   readonly property int rowHeight: Math.max(40, Math.min(58, Math.round(unit * 0.95)))
 
-  implicitHeight: handleHeight + padY * 2 + Layout.rows.length * rowHeight + (Layout.rows.length - 1) * gap
+  implicitHeight: handleHeight + padY * 2 + rows.length * rowHeight + (rows.length - 1) * gap
   color: Color.popups.background
 
   function keyWidth(units) {
@@ -50,6 +66,8 @@ Rectangle {
   function pressKey(def) {
     if (def.action) {
       if (def.id === "hide") dismissRequested()
+      else if (def.id === "layer") keyLayer = (keyLayer === "base") ? "symbols" : "base"
+      else if (def.id === "dictate") dictationRequested()
       return
     }
     if (def.mod) {
@@ -160,7 +178,7 @@ Rectangle {
     spacing: root.gap
 
     Repeater {
-      model: Layout.rows
+      model: root.rows
 
       Row {
         required property var modelData
@@ -187,11 +205,16 @@ Rectangle {
     readonly property bool isMod: !!def.mod
     readonly property bool isSpecial: !!def.special
     readonly property bool active: isMod && root.modifierActive(def.id)
-    readonly property bool down: tap.pressed
+    readonly property bool isSpace: def.id === "space"
+    property bool spaceDown: false
+    readonly property bool down: tap.pressed || spaceDown
     // Word labels (esc, ctrl, alt, super) read better small; glyphs and characters large.
     readonly property bool wordLabel: def.label.length > 2
 
-    width: root.keyWidth(def.w)
+    // The microphone key only exists when dictation is available; the space
+    // bar takes its room otherwise.
+    visible: !(def.id === "dictate" && !root.showDictation)
+    width: root.keyWidth(def.w + (isSpace && !root.showDictation ? Layout.dictationUnits : 0))
     height: root.rowHeight
     radius: Style.cornerRadius
     color: down ? Util.alpha(Color.popups.text, 0.28)
@@ -216,7 +239,7 @@ Rectangle {
 
     // Shifted symbol hint on number / punctuation keys, like a hardware cap.
     Text {
-      visible: key.def.shiftLabel !== undefined && !key.def.letter && !key.isSpecial && !root.shift
+      visible: key.def.shiftLabel !== undefined && !key.def.letter && !key.isSpecial && !key.def.sym && !root.shift
       anchors { top: parent.top; right: parent.right }
       anchors.topMargin: Style.space(3)
       anchors.rightMargin: Style.space(5)
@@ -226,8 +249,30 @@ Rectangle {
       font.pixelSize: Math.round(root.rowHeight * 0.22)
     }
 
+    // Space bar: a tap types a space, a horizontal drag moves the cursor
+    // (like holding the space bar on a phone keyboard).
+    MouseArea {
+      anchors.fill: parent
+      enabled: key.isSpace
+      visible: key.isSpace
+      property real startX: 0
+      property real travelled: 0
+      property bool moved: false
+      readonly property real step: root.rowHeight * 0.55
+      onPressed: function(mouse) { startX = mouse.x; travelled = 0; moved = false; key.spaceDown = true }
+      onPositionChanged: function(mouse) {
+        if (!pressed) return
+        var dx = mouse.x - startX
+        while (dx - travelled >= step) { travelled += step; moved = true; root.moveCursor(1) }
+        while (travelled - dx >= step) { travelled -= step; moved = true; root.moveCursor(-1) }
+      }
+      onReleased: { key.spaceDown = false; if (!moved) root.pressKey(key.def) }
+      onCanceled: key.spaceDown = false
+    }
+
     TapHandler {
       id: tap
+      enabled: !key.isSpace
       gesturePolicy: TapHandler.WithinBounds
       onPressedChanged: {
         if (pressed) {
