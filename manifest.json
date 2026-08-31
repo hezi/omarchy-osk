@@ -2,14 +2,16 @@
   "schemaVersion": 1,
   "id": "piccolo.osk",
   "name": "Piccolo on-screen keyboard",
-  "version": "0.1.0",
-  "description": "Touch keyboard for the X+ Piccolo in tablet mode: pops up on text-field focus (via fcitx5) or an edge swipe; Ctrl/Alt/Super chords; shared with the lock screen.",
+  "version": "1.0.0",
+  "author": "Jorge Cohen",
+  "description": "Touch/on-screen keyboard for the Omarchy shell (Hyprland). Pops up on text-field focus via fcitx5 or an edge swipe; real Ctrl/Alt/Super chords through ydotool so punctuation and Super binds work everywhere; symbols/function layer, cursor-drag space bar, optional dictation; shares its key surface with the lock screen.",
+  "homepage": "https://github.com/hezi/omarchy-osk",
+  "repository": "https://github.com/hezi/omarchy-osk",
   "kinds": [
     "panel"
   ],
   "keepLoaded": true,
   "entryPoints": {
     "panel": "Osk.qml"
-  },
-  "author": "piccolo-omarchy"
+  }
 }

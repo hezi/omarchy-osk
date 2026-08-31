@@ -70,6 +70,16 @@ Item {
     }
   }
 
+  // ---- first-run dependency check ------------------------------------------------
+  // `omarchy plugin add` runs no install script, so on first load make sure the
+  // typing stack is present; if not, check-deps.sh --nag points the user at
+  // setup.sh once (a state flag keeps it from repeating every shell start).
+  Process {
+    id: depCheck
+    command: ["bash", Qt.resolvedUrl("check-deps.sh").toString().replace(/^file:\/\//, ""), "--nag"]
+    running: true
+  }
+
   // ---- dictation (voxtype) -------------------------------------------------------
   // The keyboard grows a microphone key when voxtype is installed; it toggles
   // recording the same way the Pause key does in laptop mode.
