@@ -72,32 +72,50 @@ omarchy-shell osk setAutoShow always
 
 ## Layouts
 
-Tap the **globe key** (it shows the current language, e.g. `EN`) to open the
-layout picker; pick a `Language · Variant`. The choice is remembered in
-`osk.json`. Bundled so far:
+Tap the **globe key** (shows the current language, always just left of the space
+bar) to cycle the layouts you've enabled; **hold it** for the switcher, and pick
+*⚙ Manage layouts…* (or `omarchy-shell osk manage`) for the settings panel —
+toggle layouts in or out of the rotation, reorder the cycle, and flip **Split
+keyboard** (iPad-style thumb halves) and **Key preview** (iOS-style bubbles).
+Everything persists in `osk.json`.
+
+Boards are drawn on a 15-unit ANSI grid: staggered modifiers (Tab 1.5u, Caps
+1.75u, Shift 2.25u), letters that absorb leftover width on sparse rows, a
+space bar that is centered by construction, and a ?123 plane with F-keys, a
+true numpad block, arrows, and full punctuation (so every language can type
+`; : ' " < > ? !` even when its letter rows don't carry them).
+
+**Long-press** keys with a dot of extra character(s) for accents and
+alternates — `é è ê ë`, `á í ó ú ü`, Greek tonos, Arabic hamza forms, `ё`,
+`¿ ¡ € « »` — imported from AnySoftKeyboard's popupCharacters plus hand-tuned
+sets. Arabic and Persian get native `، ؛ ؟` on the bottom row.
+
+Bundled layouts:
 
 | Language | Variants |
 |---|---|
-| English | Full · Simplified |
-| Español | Full |
-| Deutsch | Full (QWERTZ, umlauts, ß) |
-| Русский | Full (ЙЦУКЕН) |
+| English | QWERTY · Simplified · Dvorak |
+| Español | QWERTY (+accents) |
+| Deutsch | QWERTZ (umlauts, ß, €) |
+| Français | AZERTY (+accents) |
+| עברית | Standard SI-1452 · AnySoftKeyboard |
+| العربية | AnySoftKeyboard (hamza on long-press) |
+| Ελληνικά | AnySoftKeyboard (tonos on long-press) |
+| Русский | AnySoftKeyboard (ЙЦУКЕН + ё) |
+| فارسی | AnySoftKeyboard |
 
 ```bash
-omarchy-shell osk layouts               # list available layouts (JSON)
-omarchy-shell osk setLayout de-full     # switch by id
+omarchy-shell osk layouts               # catalog + enabled + current (JSON)
+omarchy-shell osk setLayout de-qwertz   # jump to a layout
+omarchy-shell osk setEnabled "en-qwerty,he-standard"   # the globe rotation
+omarchy-shell osk manage                # open the settings panel
+omarchy-shell osk setSplit on           # iPad-style split
+omarchy-shell osk setKeyPreview on      # key preview bubbles
 ```
 
-Characters that aren't on the US layout (ñ, ä, Cyrillic, …) are injected with
-`wtype`; this works in terminals and GTK/Qt apps, and partially in Chromium
-(the same caveat as any Unicode there). Chords like `Ctrl+C` use the physical
-key position, so they keep working whatever letter the layout paints.
-
-**Adding a language** is a data-only change in `KeyboardLayout.js`: append a
-`fullLayout(id, language, variant, label, [topRow, homeRow, bottomRow])` (or
-`simpleLayout(...)`) to `LAYOUTS`. The builder sizes the flanking keys so every
-row lines up; give it the three letter strings and it does the rest. PRs with
-more languages are welcome.
+Adding a language is a data-only append to `CATALOG` in `KeyboardLayout.js`
+(letter rows + optional `alts`/`shiftMap`); the builders handle widths,
+stagger and balance. PRs welcome.
 
 ## Pop-up on focus (fcitx5)
 

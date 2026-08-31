@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import "KeyboardLayout.js" as Layout
 
 // On-screen keyboard for tablet mode.
 //
@@ -24,7 +25,10 @@ Item {
   // ---- settings (persisted in ~/.config/omarchy/osk.json) ------------------
   property string autoShow: "tablet"      // tablet | always | never
   property bool swipeEnabled: true
-  property string keyLayout: ""           // "" = keyboard's default
+  property string keyLayout: Layout.defaultLayout
+  property var enabledLayouts: Layout.defaultEnabled   // ids in the globe cycle
+  property bool keyPreview: false
+  property bool splitKeyboard: false
   readonly property string settingsPath: Quickshell.env("HOME") + "/.config/omarchy/osk.json"
 
   // ---- visibility state ------------------------------------------------------
@@ -34,6 +38,7 @@ Item {
   property bool tabletMode: false
   onTabletModeChanged: if (tabletMode) dismissed = false
   onKeyLayoutChanged: if (keyLayout !== "" && keyboard.keyLayout !== keyLayout) keyboard.keyLayout = keyLayout
+  onEnabledLayoutsChanged: keyboard.enabledLayouts = enabledLayouts
   readonly property bool autoAllowed: autoShow === "always" || (autoShow === "tablet" && tabletMode)
   // fcitx5 forgets on-screen-keyboard mode whenever a real key is typed; the
   // bridge re-arms it while auto-show is allowed (see osk-bridge.py).
@@ -53,6 +58,8 @@ Item {
     } else {
       unmapTimer.restart()
       keyboard.resetModifiers()
+      keyboard.pickerOpen = false
+      keyboard.settingsOpen = false
     }
     bridge.sendCmd({ cmd: "visible", value: shown })
   }
@@ -179,11 +186,22 @@ Item {
       if (s.autoShow === "tablet" || s.autoShow === "always" || s.autoShow === "never") autoShow = s.autoShow
       if (typeof s.swipe === "boolean") swipeEnabled = s.swipe
       if (typeof s.layout === "string" && s.layout) keyLayout = s.layout
+      if (Array.isArray(s.enabled) && s.enabled.length) {
+        var valid = s.enabled.filter(function(x) {
+          return typeof x === "string" && Layout.catalogList.some(function(c) { return c.id === x })
+        })
+        if (valid.length) enabledLayouts = valid
+      }
+      if (enabledLayouts.indexOf(keyLayout) < 0 && !Layout.catalogList.some(function(c) { return c.id === keyLayout }))
+        keyLayout = enabledLayouts[0] || Layout.defaultLayout
+      if (typeof s.keyPreview === "boolean") keyPreview = s.keyPreview
+      if (typeof s.split === "boolean") splitKeyboard = s.split
     } catch (e) {}
   }
 
   function saveSettings() {
-    var json = JSON.stringify({ autoShow: autoShow, swipe: swipeEnabled, layout: keyLayout }, null, 2)
+    var json = JSON.stringify({ autoShow: autoShow, swipe: swipeEnabled, layout: keyLayout,
+      enabled: enabledLayouts, keyPreview: keyPreview, split: splitKeyboard }, null, 2)
     Util.execArgv(["sh", "-c", 'printf "%s\\n" "$1" > "$2"', "_", json, settingsPath])
   }
 
@@ -198,15 +216,41 @@ Item {
         shown: root.shown, pinned: root.pinned, tabletMode: root.tabletMode,
         textFieldFocused: root.imWantsKeyboard, autoShow: root.autoShow,
         swipe: root.swipeEnabled, bridge: root.bridgeReady, dictation: root.dictationAvailable,
-        layer: keyboard.keyLayer, layout: keyboard.keyLayout
+        layer: keyboard.keyLayer, layout: keyboard.keyLayout,
+        enabled: root.enabledLayouts, keyPreview: root.keyPreview, split: root.splitKeyboard
       })
     }
     function layouts(): string {
-      return JSON.stringify(keyboard.layoutList)
+      return JSON.stringify({ catalog: Layout.catalogList, enabled: root.enabledLayouts, current: keyboard.keyLayout })
     }
     function setLayout(id: string): string {
       keyboard.selectLayout(id)
       return keyboard.keyLayout === id ? "ok" : "unknown layout: " + id
+    }
+    function setEnabled(csv: string): string {
+      var ids = csv.split(",").map(function(x){ return x.trim() }).filter(function(x){ return x !== "" })
+      var valid = ids.filter(function(id){ return Layout.catalogList.some(function(c){ return c.id === id }) })
+      if (!valid.length) return "no valid layout ids"
+      root.enabledLayouts = valid
+      if (valid.indexOf(keyboard.keyLayout) < 0) { root.keyLayout = valid[0]; keyboard.selectLayout(valid[0]) }
+      root.saveSettings()
+      return "enabled: " + valid.join(", ")
+    }
+    function manage(): string { keyboard.settingsOpen = true; return "ok" }
+    function setLayer(l: string): string {
+      if (l !== "base" && l !== "symbols") return "usage: setLayer base|symbols"
+      keyboard.keyLayer = l; return "ok"
+    }
+    function switcher(): string { keyboard.pickerOpen = true; return "ok" }
+    function setSplit(on: string): string {
+      root.splitKeyboard = (on === "1" || on === "true" || on === "on")
+      root.saveSettings()
+      return root.splitKeyboard ? "on" : "off"
+    }
+    function setKeyPreview(on: string): string {
+      root.keyPreview = (on === "1" || on === "true" || on === "on")
+      root.saveSettings()
+      return root.keyPreview ? "on" : "off"
     }
     function setAutoShow(mode: string): string {
       if (mode !== "tablet" && mode !== "always" && mode !== "never") return "usage: setAutoShow tablet|always|never"
@@ -229,11 +273,17 @@ Item {
     id: panel
     visible: root.mapped
     anchors { left: true; right: true; bottom: true }
-    implicitHeight: keyboard.implicitHeight
+    // Headroom above the keys keeps top-row key-preview bubbles from being
+    // clipped at the window edge; input is masked to the keys themselves so
+    // the transparent band never swallows taps meant for the window above.
+    readonly property int headroom: keyboard.rowHeight + Style.space(12)
+    implicitHeight: keyboard.implicitHeight + headroom
     color: "transparent"
+    mask: Region { item: keyboard }
     // Reserve space (windows tile above the keyboard, like iPad) only while
     // shown; during the slide-out the desktop can already reclaim it.
-    exclusionMode: root.shown ? ExclusionMode.Auto : ExclusionMode.Ignore
+    exclusionMode: root.shown ? ExclusionMode.Normal : ExclusionMode.Ignore
+    exclusiveZone: keyboard.implicitHeight
     WlrLayershell.namespace: "omarchy-osk"
     // Overlay, not Top: fullscreen windows render above the Top layer and
     // would cover the keyboard. The keyboard must always be the topmost thing.
@@ -245,12 +295,21 @@ Item {
       id: keyboard
       width: parent.width
       height: implicitHeight
-      y: root.shown ? 0 : height
+      y: root.shown ? panel.headroom : panel.implicitHeight
       showDictation: root.dictationAvailable
+      enabledLayouts: root.enabledLayouts
+      keyPreview: root.keyPreview
+      splitMode: root.splitKeyboard
       onKeyAction: function(a) { root.handleAction(a) }
       onDismissRequested: root.close()
       onDictationRequested: root.toggleDictation()
       onLayoutChanged: function(id) { root.keyLayout = id; root.saveSettings() }
+      onRosterEdited: function(ids) { root.enabledLayouts = ids; root.saveSettings() }
+      onPrefToggled: function(name, on) {
+        if (name === "split") root.splitKeyboard = on
+        else if (name === "preview") root.keyPreview = on
+        root.saveSettings()
+      }
       Component.onCompleted: if (root.keyLayout !== "") keyLayout = root.keyLayout
 
       Behavior on y {
