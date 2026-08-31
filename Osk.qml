@@ -186,6 +186,8 @@ Item {
       if (s.autoShow === "tablet" || s.autoShow === "always" || s.autoShow === "never") autoShow = s.autoShow
       if (typeof s.swipe === "boolean") swipeEnabled = s.swipe
       if (typeof s.layout === "string" && s.layout) keyLayout = s.layout
+      if (typeof s.layout === "string" && s.layout === "en-simple") s.layout = "en-qwerty-simple"
+      if (Array.isArray(s.enabled)) s.enabled = s.enabled.map(function(x) { return x === "en-simple" ? "en-qwerty-simple" : x })
       if (Array.isArray(s.enabled) && s.enabled.length) {
         var valid = s.enabled.filter(function(x) {
           return typeof x === "string" && Layout.catalogList.some(function(c) { return c.id === x })

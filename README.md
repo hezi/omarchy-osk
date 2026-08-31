@@ -90,6 +90,10 @@ alternates — `é è ê ë`, `á í ó ú ü`, Greek tonos, Arabic hamza forms,
 `¿ ¡ € « »` — imported from AnySoftKeyboard's popupCharacters plus hand-tuned
 sets. Arabic and Persian get native `، ؛ ؟` on the bottom row.
 
+Every layout automatically ships a **Simplified sibling** — the same letters,
+accents and shift pairs on the phone-style big-key board (per-row widths adapt
+to dense scripts), listed as *… · Simplified* in the picker.
+
 Bundled layouts:
 
 | Language | Variants |

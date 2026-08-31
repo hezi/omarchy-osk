@@ -139,12 +139,12 @@ function fullBase(lay,mic){
   return [numberRow(),row1,row2,row3,bottomRow("?123",langLabel,mic,lay.rtlPunct)];
 }
 
-function simpleBottom(layerLabel,langLabel,mic){
+function simpleBottom(layerLabel,langLabel,mic,rtl){
   var lk=action("layer",layerLabel); lk.bw=1.2;
   var left=[lk];
   if(mic)left.push(action("dictate",GLYPH.mic));
   left.push(action("globe",langLabel));
-  var c=ch(",",";",59); c.bw=0.8;
+  var c=rtl?ch("\u060C","\u061B",59):ch(",",";",59); c.bw=0.8;
   var d=ch(".",":",60); d.bw=0.8;
   var e=special("enter","\u23CE","Return",36); e.bw=1.4;
   return balancedBottom(left,[c,d,e],1.5);
@@ -152,12 +152,16 @@ function simpleBottom(layerLabel,langLabel,mic){
 
 // ---- SIMPLIFIED layout (phone, big keys; rows auto-center) ------------------
 function simpleBase(lay,mic){
-  var r=lay.ltrs, bl=1.5, langLabel=GLYPH.globe+" "+lay.label;
-  var row1=letters(r[0],null,R1).map(function(k){k.w=bl;return k;});
-  var row2=letters(r[1],null,R2).map(function(k){k.w=bl;return k;});
-  var row3=[modifier("shift","⇧",2)].concat(letters(r[2],null,R3).map(function(k){k.w=bl;return k;}));
-  row3.push(special("backspace","⌫","BackSpace",22,2,{repeat:true}));
-  return [row1,row2,row3,simpleBottom("?123",langLabel,mic)];
+  // Phone-style board for ANY layout: per-row letter width caps at 1.5u and
+  // shrinks for dense scripts so every row fits the 15u board.
+  var r=lay.ltrs, langLabel=GLYPH.globe+" "+lay.label, sm=lay.shiftMap;
+  function fit(row,avail){var w=Math.min(1.5,Math.round(avail/row.length*1000)/1000);
+    for(var i=0;i<row.length;i++)row[i].w=w;return row;}
+  var row1=fit(letters(r[0],null,R1,sm),15);
+  var row2=fit(letters(r[1],null,R2,sm),15);
+  var row3=[modifier("shift","\u21E7",2)].concat(fit(letters(r[2],null,R3,sm),11));
+  row3.push(special("backspace","\u232B","BackSpace",22,2,{repeat:true}));
+  return [row1,row2,row3,simpleBottom("?123",langLabel,mic,lay.rtlPunct)];
 }
 function simpleSymbols(lay,mic){
   var bl=1.5, langLabel=GLYPH.globe+" "+lay.label;
@@ -169,13 +173,12 @@ function simpleSymbols(lay,mic){
   var row3=[sym("'",48,s3),sym("\"",48,s3),sym(";",47,s3),sym(":",47,s3),sym("!",10,s3),sym("?",61,s3),
     sym("/",61,s3),sym("\\",51,s3),sym("<",59,s3),sym(">",60,s3)];
   row3.push(special("backspace","⌫","BackSpace",22,2,{repeat:true}));
-  return [row1,row2,row3,simpleBottom("abc",langLabel,mic)];
+  return [row1,row2,row3,simpleBottom("abc",langLabel,mic,lay.rtlPunct)];
 }
 
 // ---- catalog (bundled locally for now; a GitHub catalog comes later) --------
 var CATALOG=[
   {id:"en-qwerty", language:"English",  variant:"QWERTY",     label:"EN", v:"full",   ltrs:["qwertyuiop","asdfghjkl","zxcvbnm"]},
-  {id:"en-simple", language:"English",  variant:"Simplified", label:"EN", v:"simple", ltrs:["qwertyuiop","asdfghjkl","zxcvbnm"]},
   {id:"es-qwerty", language:"Español",  variant:"QWERTY",     label:"ES", v:"full",   ltrs:["qwertyuiop","asdfghjklñ","zxcvbnm"]},
   {id:"de-qwertz", language:"Deutsch",  variant:"QWERTZ",     label:"DE", v:"full",   ltrs:["qwertzuiopü","asdfghjklöä","yxcvbnm"], deExtra:true},
   {id:"fr-azerty", language:"Français", variant:"AZERTY",     label:"FR", v:"full",   ltrs:["azertyuiop","qsdfghjklm","wxcvbn"]},
@@ -195,18 +198,31 @@ var CATALOG=[
 function buildLayout(lay,mic){
   var base = lay.v==='simple'? simpleBase(lay,mic) : fullBase(lay,mic);
   var symbols = lay.v==='simple'? simpleSymbols(lay,mic) : symbolsRows(GLYPH.globe+" "+lay.label,mic,lay.rtlPunct);
-  applyAlts(base, LAYALTS[lay.id]);
-  applyAlts(symbols, LAYALTS[lay.id]);
+  var altMap = LAYALTS[lay.id] || LAYALTS[lay.id.replace(/-simple$/, "")];
+  applyAlts(base, altMap);
+  applyAlts(symbols, altMap);
   return { id:lay.id, language:lay.language, variant:lay.variant, label:lay.label, base:base, symbols:symbols };
 }
 
 // layouts() rebuilds with the current mic setting (widths depend on it).
-function make(mic){
-  var m={}; for(var i=0;i<CATALOG.length;i++) m[CATALOG[i].id]=buildLayout(CATALOG[i],mic); return m;
+// Every full layout gets an auto-generated phone-style sibling.
+function expandCatalog(){
+  var out=[];
+  for(var i=0;i<CATALOG.length;i++){
+    var e=CATALOG[i]; out.push(e);
+    var c={}; for(var p in e) c[p]=e[p];
+    c.id=e.id+"-simple"; c.v="simple"; c.variant=e.variant+" \u00b7 Simplified";
+    out.push(c);
+  }
+  return out;
 }
-var catalogList = CATALOG.map(function(c){return {id:c.id,language:c.language,variant:c.variant,label:c.label,v:c.v};});
+var EXPANDED=expandCatalog();
+function make(mic){
+  var m={}; for(var i=0;i<EXPANDED.length;i++) m[EXPANDED[i].id]=buildLayout(EXPANDED[i],mic); return m;
+}
+var catalogList = EXPANDED.map(function(c){return {id:c.id,language:c.language,variant:c.variant,label:c.label,v:c.v};});
 var defaultLayout = "en-qwerty";
-var defaultEnabled = ["en-qwerty","en-simple","es-qwerty"];
+var defaultEnabled = ["en-qwerty","en-qwerty-simple","es-qwerty"];
 
 // Long-press alternates: per-layout maps (AnySoftKeyboard popupCharacters +
 // hand-authored accents); SHARED_ALTS applies on every layout.

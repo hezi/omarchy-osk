@@ -247,6 +247,7 @@ Rectangle {
   }
 
   function labelFor(def) {
+    if (!def || def.gap || def.label === undefined) return ""
     if (def.letter) return (shift || capsLock) ? def.shiftLabel : def.label
     if (def.shiftLabel !== undefined && !def.special) return shift ? def.shiftLabel : def.label
     return def.label
@@ -625,7 +626,7 @@ Rectangle {
     property bool spaceDown: false
     readonly property bool down: tap.pressed || spaceDown
     // Word labels (esc, ctrl, alt, super) read better small; glyphs and characters large.
-    readonly property bool wordLabel: def.label.length > 2
+    readonly property bool wordLabel: (def.label || "").length > 2
 
     readonly property bool isGlobe: def.id === "globe"
     readonly property bool isChar: !isGap && !isSpecial && !isMod && !isSpace && def.label !== "" && def.label.length <= 2

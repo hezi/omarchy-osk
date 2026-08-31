@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "piccolo.osk",
   "name": "Piccolo on-screen keyboard",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "author": "Jorge Cohen",
   "description": "Touch/on-screen keyboard for the Omarchy shell (Hyprland). ANSI-staggered full boards and phone-style simplified boards for 12 language layouts (incl. AnySoftKeyboard imports), iOS-style globe switching with a manage panel, long-press accent/alternate popups, iPad-style split mode, key preview bubbles, real Ctrl/Alt/Super chords via ydotool, and a shared key surface for the lock screen.",
   "homepage": "https://github.com/hezi/omarchy-osk",
