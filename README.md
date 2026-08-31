@@ -93,22 +93,10 @@ Everything persists in `osk.json`.
 
 ![Layout switcher](docs/switcher.png)
 
-Boards are drawn on a 15-unit ANSI grid: staggered modifiers (Tab 1.5u, Caps
-1.75u, Shift 2.25u), letters that absorb leftover width on sparse rows, a
-space bar that is centered by construction, and a ?123 plane with F-keys, a
-true numpad block, arrows, and full punctuation (so every language can type
-`; : ' " < > ? !` even when its letter rows don't carry them).
-
 ![Hebrew — Standard SI-1452](docs/hebrew.png)
 
-**Long-press** keys with a dot of extra character(s) for accents and
-alternates — `é è ê ë`, `á í ó ú ü`, Greek tonos, Arabic hamza forms, `ё`,
-`¿ ¡ € « »` — imported from AnySoftKeyboard's popupCharacters plus hand-tuned
-sets. Arabic and Persian get native `، ؛ ؟` on the bottom row.
-
-Every layout automatically ships a **Simplified sibling** — the same letters,
-accents and shift pairs on the phone-style big-key board (per-row widths adapt
-to dense scripts), listed as *… · Simplified* in the picker.
+Every layout also ships a phone-style **Simplified sibling**, listed as
+*… · Simplified* in the picker.
 
 ![Simplified](docs/simplified.png)
 
@@ -141,9 +129,8 @@ omarchy-shell osk setKeyPreview on      # key preview bubbles
 
 ![Manage layouts](docs/manage.png)
 
-Adding a language is a data-only append to `CATALOG` in `KeyboardLayout.js`
-(letter rows + optional `alts`/`shiftMap`); the builders handle widths,
-stagger and balance. PRs welcome.
+Adding a language is a data-only append to `CATALOG` in `KeyboardLayout.js`;
+the builders handle widths, stagger and balance. PRs welcome.
 
 ## Suggestions, autocorrect & glide typing
 
