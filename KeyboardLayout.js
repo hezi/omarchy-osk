@@ -58,26 +58,26 @@ function letters(lower, upper, codes) {
 }
 
 // ---- shared pieces -----------------------------------------------------------
-var dictationUnits = 1.25;
+var dictationUnits = 1.4;
 
-// Bottom row, shared by every layout. `langLabel` rides the globe key so the
-// current language is visible; it opens the layout picker.
+// Bottom row, shared by every layout. Kept deliberately sparse: ctrl / super /
+// alt / ?123 / globe / mic / space / ← → . The keyboard is dismissed by
+// dragging the handle down (or the keybind); ↑ ↓ live on the symbols layer.
+// `langLabel` rides the globe key so the current language shows; it opens the
+// layout picker.
 function bottomRow(layerLabel, langLabel, multiLayout) {
-  var row = [
-    modifier("ctrl", "ctrl", 1.25),
-    modifier("super", "super", 1.25),
-    modifier("alt", "alt", 1.25),
-    action("layer", layerLabel, 1.25)
-  ];
-  if (multiLayout) row.push(action("globe", langLabel || GLYPH.globe, 1.25));
-  row.push(action("dictate", GLYPH.microphone, dictationUnits));
-  row.push(special("space", "", "space", 65, multiLayout ? 3.25 : 4.5));
-  row.push(action("hide", GLYPH.keyboardClose, 1.25));
-  row.push(special("left", "←", "Left", 113, 1, { repeat: true }));
-  row.push(special("up", "↑", "Up", 111, 1, { repeat: true }));
-  row.push(special("down", "↓", "Down", 116, 1, { repeat: true }));
-  row.push(special("right", "→", "Right", 114, 1, { repeat: true }));
-  return row;
+  var W = 1.4;
+  var fixed = [modifier("ctrl", "ctrl", W), modifier("super", "super", W),
+               modifier("alt", "alt", W), action("layer", layerLabel, W)];
+  if (multiLayout) fixed.push(action("globe", langLabel || GLYPH.globe, W));
+  fixed.push(action("dictate", GLYPH.microphone, dictationUnits));
+  var fixedW = W * (multiLayout ? 5 : 4) + dictationUnits;
+  var spaceW = 16 - fixedW - 2;                 // 2 = the two arrow keys
+  return fixed.concat([
+    special("space", "", "space", 65, spaceW),
+    special("left", "\u2190", "Left", 113, 1, { repeat: true }),
+    special("right", "\u2192", "Right", 114, 1, { repeat: true })
+  ]);
 }
 
 // The full ASCII symbols/number layer (shared: numbers and symbols are the same
@@ -126,45 +126,52 @@ var NUMBER_ROW = [
   special("backspace", "\u234C", "BackSpace", 22, 2, { repeat: true })
 ];
 
-// A "full" QWERTY-family layout: number row + three letter rows + symbols. The
-// flanking keys (\, enter, right shift) take whatever width is left so every
-// row totals 16 regardless of how many letters the language packs in.
+// A "full" QWERTY-family layout: number row + three letter rows + symbols.
+// Letters fill each row so the modifier keys stay compact and the letters are
+// as large as the language's widest row allows; punctuation beyond \ , . / and
+// the number row lives on the symbols (?123) layer.
 //   rows  = [top, home, bottom] lowercase strings
 //   up    = optional matching uppercase strings
-//   extra = optional { r3: [keys] } to override the bottom row's punctuation
+//   extra = optional { r3: [keys] } to replace the bottom row's , . / (German ß)
 function fullLayout(id, language, variant, langLabel, rows, up, extra) {
   extra = extra || {};
+  var maxLetters = Math.max(rows[0].length, rows[1].length, rows[2].length);
+  var LW = Math.min(1.3, (16 - 3) / maxLetters);   // letter width, capped so EN aligns
+  function fill(w) { return Math.round(w * 1000) / 1000; }
 
-  function topRow(lower, upper) {
-    var ks = [special("tab", "\u21E5", "Tab", 23, 2)].concat(letters(lower, upper, ROW1_CODES));
-    var rem = 16 - 2 - lower.length;                       // room for [ ] \
-    if (rem >= 4)      ks.push(ch("[", "{", 34, 1), ch("]", "}", 35, 1), ch("\\", "|", 51, rem - 2));
-    else if (rem === 3) ks.push(ch("[", "{", 34, 1), ch("]", "}", 35, 1), ch("\\", "|", 51, 1));
-    else if (rem === 2) ks.push(ch("[", "{", 34, 1), ch("]", "}", 35, 1));
-    else if (rem === 1) ks.push(ch("\\", "|", 51, 1));
-    return ks;
+  function numberRow() {
+    return [
+      special("esc", "esc", "Escape", 9, 1),
+      ch("`", "~", 49), ch("1", "!", 10), ch("2", "@", 11), ch("3", "#", 12), ch("4", "$", 13),
+      ch("5", "%", 14), ch("6", "^", 15), ch("7", "&", 16), ch("8", "*", 17), ch("9", "(", 18),
+      ch("0", ")", 19), ch("-", "_", 20), ch("=", "+", 21),
+      special("backspace", "\u234C", "BackSpace", 22, 2, { repeat: true })
+    ];
+  }
+  function row(lower, upper, codes, left, right, mid) {
+    var out = [left];
+    for (var i = 0; i < lower.length; i++) {
+      var k = letter(lower[i], upper ? upper[i] : null, codes[i]); k.w = LW; out.push(k);
+    }
+    if (mid) for (var j = 0; j < mid.length; j++) out.push(mid[j]);
+    var used = left.w; for (var m = 0; m < out.length; m++) if (out[m] !== left) used += (out[m].w || 1);
+    right.w = fill(16 - used); out.push(right);
+    return out;
   }
 
-  function homeRow(lower, upper) {
-    var trailing = [ch(";", ":", 47), ch("'", "\"", 48)];
-    var trW = 2, enterW = 16 - 2.25 - lower.length - trW;
-    if (enterW < 1.5) { trailing = []; enterW = 16 - 2.25 - lower.length; }
-    return [modifier("caps", "\u21EA", 2.25)]
-      .concat(letters(lower, upper, ROW2_CODES)).concat(trailing)
-      .concat([special("enter", "\u23CE", "Return", 36, enterW)]);
-  }
+  var midR3 = extra.r3 !== undefined ? extra.r3 : [ch(",", "<", 59), ch(".", ">", 60), ch("/", "?", 61)];
+  for (var mi = 0; mi < midR3.length; mi++) midR3[mi].w = LW;
 
-  function shiftRow(lower, upper) {
-    var trailing = extra.r3 !== undefined ? extra.r3 : [ch(",", "<", 59), ch(".", ">", 60), ch("/", "?", 61)];
-    var trW = rowWidth(trailing);
-    var rShiftW = Math.max(1, 16 - 2.75 - lower.length - trW);
-    return [modifier("shift", "\u21E7", 2.75)]
-      .concat(letters(lower, upper, ROW3_CODES)).concat(trailing)
-      .concat([modifier("shift", "\u21E7", rShiftW)]);
-  }
-
-  var base = [NUMBER_ROW, topRow(rows[0], up && up[0]), homeRow(rows[1], up && up[1]),
-              shiftRow(rows[2], up && up[2]), bottomRow("?123", langLabel, true)];
+  var base = [
+    numberRow(),
+    row(rows[0], up && up[0], ROW1_CODES, special("tab", "\u21E5", "Tab", 23, 1.5),
+        ch("\\", "|", 51, 1.5)),
+    row(rows[1], up && up[1], ROW2_CODES, modifier("caps", "\u21EA", 1.5),
+        special("enter", "\u23CE", "Return", 36, 2)),
+    row(rows[2], up && up[2], ROW3_CODES, modifier("shift", "\u21E7", 1.5),
+        modifier("shift", "\u21E7", 1.5), midR3),
+    bottomRow("?123", langLabel, true)
+  ];
   return { id: id, language: language, variant: variant, label: langLabel,
            base: base, symbols: symbolsLayer(langLabel, true) };
 }
