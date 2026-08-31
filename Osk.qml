@@ -24,6 +24,7 @@ Item {
   // ---- settings (persisted in ~/.config/omarchy/osk.json) ------------------
   property string autoShow: "tablet"      // tablet | always | never
   property bool swipeEnabled: true
+  property string keyLayout: ""           // "" = keyboard's default
   readonly property string settingsPath: Quickshell.env("HOME") + "/.config/omarchy/osk.json"
 
   // ---- visibility state ------------------------------------------------------
@@ -32,6 +33,7 @@ Item {
   property bool dismissed: false          // hide key pressed while the field kept focus
   property bool tabletMode: false
   onTabletModeChanged: if (tabletMode) dismissed = false
+  onKeyLayoutChanged: if (keyLayout !== "" && keyboard.keyLayout !== keyLayout) keyboard.keyLayout = keyLayout
   readonly property bool autoAllowed: autoShow === "always" || (autoShow === "tablet" && tabletMode)
   // fcitx5 forgets on-screen-keyboard mode whenever a real key is typed; the
   // bridge re-arms it while auto-show is allowed (see osk-bridge.py).
@@ -176,11 +178,12 @@ Item {
       var s = JSON.parse(raw)
       if (s.autoShow === "tablet" || s.autoShow === "always" || s.autoShow === "never") autoShow = s.autoShow
       if (typeof s.swipe === "boolean") swipeEnabled = s.swipe
+      if (typeof s.layout === "string" && s.layout) keyLayout = s.layout
     } catch (e) {}
   }
 
   function saveSettings() {
-    var json = JSON.stringify({ autoShow: autoShow, swipe: swipeEnabled }, null, 2)
+    var json = JSON.stringify({ autoShow: autoShow, swipe: swipeEnabled, layout: keyLayout }, null, 2)
     Util.execArgv(["sh", "-c", 'printf "%s\\n" "$1" > "$2"', "_", json, settingsPath])
   }
 
@@ -195,8 +198,15 @@ Item {
         shown: root.shown, pinned: root.pinned, tabletMode: root.tabletMode,
         textFieldFocused: root.imWantsKeyboard, autoShow: root.autoShow,
         swipe: root.swipeEnabled, bridge: root.bridgeReady, dictation: root.dictationAvailable,
-        layer: keyboard.keyLayer
+        layer: keyboard.keyLayer, layout: keyboard.keyLayout
       })
+    }
+    function layouts(): string {
+      return JSON.stringify(keyboard.layoutList)
+    }
+    function setLayout(id: string): string {
+      keyboard.selectLayout(id)
+      return keyboard.keyLayout === id ? "ok" : "unknown layout: " + id
     }
     function setAutoShow(mode: string): string {
       if (mode !== "tablet" && mode !== "always" && mode !== "never") return "usage: setAutoShow tablet|always|never"
@@ -240,6 +250,8 @@ Item {
       onKeyAction: function(a) { root.handleAction(a) }
       onDismissRequested: root.close()
       onDictationRequested: root.toggleDictation()
+      onLayoutChanged: function(id) { root.keyLayout = id; root.saveSettings() }
+      Component.onCompleted: if (root.keyLayout !== "") keyLayout = root.keyLayout
 
       Behavior on y {
         NumberAnimation { duration: 200; easing.type: Easing.OutCubic }

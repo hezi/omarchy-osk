@@ -70,6 +70,35 @@ keybind only):
 omarchy-shell osk setAutoShow always
 ```
 
+## Layouts
+
+Tap the **globe key** (it shows the current language, e.g. `EN`) to open the
+layout picker; pick a `Language · Variant`. The choice is remembered in
+`osk.json`. Bundled so far:
+
+| Language | Variants |
+|---|---|
+| English | Full · Simplified |
+| Español | Full |
+| Deutsch | Full (QWERTZ, umlauts, ß) |
+| Русский | Full (ЙЦУКЕН) |
+
+```bash
+omarchy-shell osk layouts               # list available layouts (JSON)
+omarchy-shell osk setLayout de-full     # switch by id
+```
+
+Characters that aren't on the US layout (ñ, ä, Cyrillic, …) are injected with
+`wtype`; this works in terminals and GTK/Qt apps, and partially in Chromium
+(the same caveat as any Unicode there). Chords like `Ctrl+C` use the physical
+key position, so they keep working whatever letter the layout paints.
+
+**Adding a language** is a data-only change in `KeyboardLayout.js`: append a
+`fullLayout(id, language, variant, label, [topRow, homeRow, bottomRow])` (or
+`simpleLayout(...)`) to `LAYOUTS`. The builder sizes the flanking keys so every
+row lines up; give it the three letter strings and it does the rest. PRs with
+more languages are welcome.
+
 ## Pop-up on focus (fcitx5)
 
 Focus detection uses fcitx5's DBus virtual-keyboard backend, so it needs

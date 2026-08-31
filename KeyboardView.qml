@@ -12,6 +12,8 @@ import "KeyboardLayout.js" as Layout
 // `dictationRequested` for the microphone key (shown when `showDictation`).
 //
 // Two layers (`keyLayer`: "base" | "symbols"), switched with the ?123 / abc key.
+// Many layouts (`keyLayout`: an id from KeyboardLayout.layouts), switched with
+// the globe key, which opens a picker.
 // Dragging a finger along the space bar moves the text cursor.
 //
 // Used by Osk.qml (tablet keyboard, injects into apps) and by the lock
@@ -23,11 +25,25 @@ Rectangle {
   signal keyAction(var action)
   signal dismissRequested()
   signal dictationRequested()
+  signal layoutChanged(string id)
 
-  // ---- layers ---------------------------------------------------------------------
-  property string keyLayer: "base"         // base | symbols
-  readonly property var rows: Layout.layers[keyLayer] || Layout.base
+  // ---- layouts & layers -----------------------------------------------------------
+  property string keyLayout: Layout.defaultLayout   // a KeyboardLayout id
+  property string keyLayer: "base"                  // base | symbols
+  readonly property var currentLayout: Layout.layouts[keyLayout] || Layout.layouts[Layout.defaultLayout]
+  readonly property var rows: currentLayout[keyLayer] || currentLayout.base
+  readonly property var layoutList: Layout.layoutList
+  property bool pickerOpen: false
   property bool showDictation: false
+
+  function selectLayout(id) {
+    if (!Layout.layouts[id]) return
+    keyLayout = id
+    keyLayer = "base"
+    pickerOpen = false
+    resetModifiers()
+    layoutChanged(id)
+  }
 
   // ---- modifier state ----------------------------------------------------------
   property bool shift: false
@@ -67,6 +83,7 @@ Rectangle {
     if (def.action) {
       if (def.id === "hide") dismissRequested()
       else if (def.id === "layer") keyLayer = (keyLayer === "base") ? "symbols" : "base"
+      else if (def.id === "globe") pickerOpen = !pickerOpen
       else if (def.id === "dictate") dictationRequested()
       return
     }
@@ -191,6 +208,94 @@ Rectangle {
           KeyCap {
             required property var modelData
             def: modelData
+          }
+        }
+      }
+    }
+  }
+
+  // ---- layout picker ---------------------------------------------------------------
+  // Covers the keys while open; a tap outside a row closes it. One row per
+  // layout, "Language · Variant", grouped visually by language.
+  Rectangle {
+    id: picker
+    visible: root.pickerOpen
+    anchors { top: handle.bottom; left: parent.left; right: parent.right; bottom: parent.bottom }
+    color: Color.popups.background
+
+    MouseArea { anchors.fill: parent; onClicked: root.pickerOpen = false }
+
+    Text {
+      anchors { top: parent.top; horizontalCenter: parent.horizontalCenter }
+      anchors.topMargin: root.gap
+      text: "Keyboard layout"
+      color: Util.alpha(Color.popups.text, 0.6)
+      font.family: Style.font.family
+      font.pixelSize: Math.round(root.rowHeight * 0.28)
+      font.bold: true
+    }
+
+    Flickable {
+      anchors { top: parent.top; left: parent.left; right: parent.right; bottom: parent.bottom }
+      anchors.topMargin: Math.round(root.rowHeight * 0.55)
+      anchors.margins: root.padX
+      contentHeight: pickerCol.implicitHeight
+      clip: true
+      boundsBehavior: Flickable.StopAtBounds
+
+      Column {
+        id: pickerCol
+        width: parent.width
+        spacing: root.gap
+
+        Repeater {
+          model: root.layoutList
+
+          Rectangle {
+            required property var modelData
+            width: parent.width
+            height: Math.round(root.rowHeight * 0.9)
+            radius: Style.cornerRadius
+            readonly property bool current: modelData.id === root.keyLayout
+            color: current ? Util.alpha(Color.accent, 0.28)
+                 : lrTap.pressed ? Util.alpha(Color.popups.text, 0.20)
+                 : Util.alpha(Color.popups.text, 0.07)
+            border.width: current ? Math.max(1, Style.space(1)) : 0
+            border.color: Color.accent
+
+            Row {
+              anchors { left: parent.left; verticalCenter: parent.verticalCenter }
+              anchors.leftMargin: Style.space(12)
+              spacing: Style.space(10)
+
+              Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Math.round(root.rowHeight * 0.7); height: width
+                radius: Style.cornerRadius
+                color: Util.alpha(Color.popups.text, 0.10)
+                Text {
+                  anchors.centerIn: parent
+                  text: modelData.label
+                  color: Color.popups.text
+                  font.family: Style.font.family
+                  font.pixelSize: Math.round(root.rowHeight * 0.26)
+                  font.bold: true
+                }
+              }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: modelData.language + "  ·  " + modelData.variant
+                color: current ? Color.accent : Color.popups.text
+                font.family: Style.font.family
+                font.pixelSize: Math.round(root.rowHeight * 0.30)
+              }
+            }
+
+            TapHandler {
+              id: lrTap
+              gesturePolicy: TapHandler.WithinBounds
+              onTapped: root.selectLayout(modelData.id)
+            }
           }
         }
       }
