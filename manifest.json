@@ -4,7 +4,8 @@
   "name": "Piccolo on-screen keyboard",
   "version": "2.2.0",
   "author": "Jorge Cohen",
-  "description": "Touch/on-screen keyboard for the Omarchy shell (Hyprland). Glide (swipe) typing with a finger trail, a suggestion strip and terminal-aware autocorrect with per-language dictionaries fetched on demand; ANSI-staggered full boards and phone-style simplified boards for 12 language layouts (incl. AnySoftKeyboard imports), iOS-style globe switching with a manage panel, long-press accent/alternate popups, iPad-style split mode, key preview bubbles, real Ctrl/Alt/Super chords via ydotool, and a shared key surface for the lock screen.",
+  "license": "MIT",
+  "description": "Touch/on-screen keyboard for the Omarchy shell (Hyprland). Glide (swipe) typing with a finger trail, suggestion strip and terminal-aware autocorrect; 22 layouts across 9 languages with iOS-style globe switching, long-press accents, split mode and key-preview bubbles; real Ctrl/Alt/Super chords via ydotool; shares its key surface with the lock screen.",
   "homepage": "https://github.com/hezi/omarchy-osk",
   "repository": "https://github.com/hezi/omarchy-osk",
   "kinds": [
