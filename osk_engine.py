@@ -13,24 +13,73 @@ end keys and length, then score candidates by how closely the resampled
 finger path matches the word's ideal path through the key centers, blended
 with word frequency.
 """
-import gzip, io, math, os, re, threading, urllib.request
+import gzip, hashlib, io, math, os, re, tempfile, threading, urllib.request, urllib.error
+from urllib.parse import urlsplit
 
 DICT_DIR = os.path.expanduser("~/.config/omarchy/osk/dict")
-RAW = "https://raw.githubusercontent.com/AnySoftKeyboard/LanguagePack/master/languages/%s/pack/dictionary/%s"
+
+# Dictionaries are fetched from AnySoftKeyboard's LanguagePack, pinned to an
+# immutable commit so the artifact can never change under us, and each file is
+# verified against a known SHA-256 and exact byte size *before* it is used.
+_PIN = "87e4c88d92b62afdb541e3bb0d16c6a47e63e835"
+RAW = ("https://raw.githubusercontent.com/AnySoftKeyboard/LanguagePack/"
+       + _PIN + "/languages/%s/pack/dictionary/%s")
+# lang -> (subdir, filename, sha256, size_bytes)
 SOURCES = {
-    "english":  ("english",  "aosp.combined.gz"),
-    "spain":    ("spain",    "aosp.combined"),
-    "german":   ("german",   "de_wordlist.combined.gz"),
-    "french":   ("french",   "aosp.combined.gz"),
-    "hebrew":   ("hebrew",   "aosp.combined.gz"),
-    "greek":    ("greek",    "aosp.combined.gz"),
-    "russian2": ("russian2", "aosp.combined.gz"),
-    "arabic":   ("arabic",   "lulua.combined.gz"),
-    "persian":  ("persian",  "PersianPrebuild.xml"),
+    "english":  ("english",  "aosp.combined.gz",              "ffa9a0229ae81e4a942456d37c3db0cff984dd4b00980c42d4b87307e0fd97cf",   914064),
+    "spain":    ("spain",    "aosp.combined",                 "bfcc7dd558dbb2251647f2f97124af555247a7bf168f38aa9fa8bc0a925b93af", 11091235),
+    "german":   ("german",   "de_wordlist.combined.gz",       "38996899f92e386541677a5b9b3f8677f17d3c05116475ac71e22bcf5037022f",  1293426),
+    "french":   ("french",   "aosp.combined.gz",              "4b6f00ef820514e2f354cfa9be885a49aa5c18926dd1ebb4991978816373805d",  1108437),
+    "hebrew":   ("hebrew",   "aosp.combined.gz",              "678eff40afd23e6f0a8460b5600b5811d1798c05898a93045fad9c8b0aaa62bf",   465934),
+    "greek":    ("greek",    "aosp.combined.gz",              "45ca1e21ff24322762f34b1feac4cb2427645a396621a1ea8aaebcf9217653e6",  1134961),
+    "russian2": ("russian2", "aosp.combined.gz",              "3327b3da5a5cf23eebdbc124e62c2e5c5addaf1523cbcfa8b6311336a5c3eb10",  1397640),
+    "arabic":   ("arabic",   "lulua.combined.gz",             "718240b5692cc342c5887eb49c0d182ff107e91445963e62679ee85a66b7d7d4", 27402426),
+    "persian":  ("persian",  "prebuilt/PersianPrebuild.xml",  "ca2ea241b3c2bb081652e66f5c85037adcaf1b41918acabcf1d39a3fc16c0815",  5851214),
 }
 MAX_WORDS = 80000          # cap per language, sorted by frequency
 CORR_POOL = 40000          # typo corrections only target common words
 SWIPE_POOL = 50000
+_MAX_DECOMPRESSED = 256 * 1024 * 1024   # gzip expansion ceiling (defense in depth)
+_MAX_CACHE_BYTES = 64 * 1024 * 1024     # ignore a cache file larger than this
+_MAX_CACHE_LINES = MAX_WORDS + 16
+
+def _safe_lang(lang):
+    # Allowlist only: the name also becomes a filename, so no separators/traversal.
+    return lang if (lang in SOURCES and re.fullmatch(r"[a-z0-9]+", lang or "")) else None
+
+class _HostLockedRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only within githubusercontent.com over https."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parts = urlsplit(newurl)
+        host = parts.hostname or ""
+        if parts.scheme != "https" or not (host == "raw.githubusercontent.com"
+                                           or host.endswith(".githubusercontent.com")):
+            raise urllib.error.HTTPError(newurl, code, "redirect host not allowed", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+_opener = urllib.request.build_opener(_HostLockedRedirect)
+
+def _download_verified(url, sha, size):
+    with _opener.open(url, timeout=60) as r:
+        data = r.read(size + 1)          # bounded: never stream more than one byte over
+    if len(data) != size:
+        raise ValueError("size mismatch (%d != %d)" % (len(data), size))
+    if hashlib.sha256(data).hexdigest() != sha:
+        raise ValueError("digest mismatch")
+    return data
+
+def _atomic_write(path, text):
+    d = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".osk-", suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try: os.unlink(tmp)
+        except OSError: pass
+        raise
 
 def _parse_combined(text):
     words = {}
@@ -51,25 +100,27 @@ def _parse_xml(text):
     return words
 
 def fetch_dict(lang, log=lambda *_: None):
-    """Download + convert one language; returns the cache path or None."""
-    os.makedirs(DICT_DIR, exist_ok=True)
+    """Download + verify + convert one language; returns the cache path or None."""
+    lang = _safe_lang(lang)
+    if not lang:
+        return None
+    os.makedirs(DICT_DIR, mode=0o700, exist_ok=True)
     path = os.path.join(DICT_DIR, lang + ".txt")
     if os.path.exists(path):
         return path
-    src = SOURCES.get(lang)
-    if not src:
-        return None
-    url = RAW % src
+    subdir, fname, sha, size = SOURCES[lang]
+    url = RAW % (subdir, fname)
     try:
-        raw = urllib.request.urlopen(url, timeout=60).read()
-        if src[1].endswith(".gz"):
-            raw = gzip.decompress(raw)
+        raw = _download_verified(url, sha, size)   # exact digest+size checked first
+        if fname.endswith(".gz"):
+            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+                raw = gz.read(_MAX_DECOMPRESSED + 1)
+            if len(raw) > _MAX_DECOMPRESSED:
+                raise ValueError("decompressed too large")
         text = raw.decode("utf-8", "replace")
-        words = _parse_xml(text) if src[1].endswith(".xml") else _parse_combined(text)
+        words = _parse_xml(text) if fname.endswith(".xml") else _parse_combined(text)
         out = sorted(words.items(), key=lambda kv: -kv[1])[:MAX_WORDS]
-        with open(path, "w", encoding="utf-8") as f:
-            for w, fr in out:
-                f.write("%s\t%d\n" % (w, fr))
+        _atomic_write(path, "".join("%s\t%d\n" % (w, fr) for w, fr in out))
         log("dict ready", lang, len(out))
         return path
     except Exception as exc:
@@ -97,9 +148,17 @@ class Engine:
             path = fetch_dict(lang, self.log)
             if not path:
                 return
+            try:
+                if os.path.getsize(path) > _MAX_CACHE_BYTES:
+                    self.log("dict cache too large, ignoring", lang)
+                    return
+            except OSError:
+                return
             words, lower, by_first = {}, {}, {}
             with open(path, encoding="utf-8") as f:
-                for ln in f:
+                for _i, ln in enumerate(f):
+                    if _i >= _MAX_CACHE_LINES:
+                        break
                     try:
                         w, fr = ln.rstrip("\n").split("\t")
                         fr = int(fr)

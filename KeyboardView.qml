@@ -191,6 +191,16 @@ Rectangle {
   property real altX: 0
   property real altY: 0
   property bool altOpen: false
+  // A punctuation key with exactly one alternate morphs in place on hold and
+  // types the alternate on release (no popup). Letters keep type-on-press.
+  // Keyed by def.id (a string): model objects don't survive a var round-trip
+  // as the same reference, so identity comparison can't be used here.
+  property string morphedId: ""
+  function isMorphKey(def) {
+    // Any non-letter key with alternate(s): flick down or hold to reach them.
+    // (Letters live under the glide overlay and are handled there.)
+    return !!def && !!def.alts && !def.letter && !def.mod && !def.action && !def.gap && def.id !== "space"
+  }
   function openAltsAt(pos, def, retract) {
     if (!def.alts) return
     if (retract) keyAction({ kind: "key", name: "BackSpace", code: 22 })
@@ -365,7 +375,9 @@ Rectangle {
         Text {
           id: candText
           anchors.centerIn: parent
-          text: modelData
+          textFormat: Text.PlainText
+          elide: Text.ElideRight
+          text: String(modelData).substring(0, 64)
           color: index === 0 ? Color.popups.text : Util.alpha(Color.popups.text, 0.75)
           font.family: Style.font.family
           font.pixelSize: Math.round(root.stripH * 0.52)
@@ -475,7 +487,7 @@ Rectangle {
   // here; the key under the finger still lights up via overlayPressedDef.
   MouseArea {
     id: glide
-    visible: root.glideEnabled && root.keyLayer === "base" && !root.pickerOpen && !root.settingsOpen
+    visible: root.glideEnabled && root.keyLayer === "base" && !root.pickerOpen && !root.settingsOpen && !root.altOpen
     enabled: visible
     readonly property var span: visible ? root.letterRowSpan() : null
     anchors.left: parent.left
@@ -490,11 +502,12 @@ Rectangle {
     property var pressDef: null
     property point pressPos: Qt.point(0, 0)
     property bool altsShown: false
+    property bool flicking: false
     function localToRoot(px, py) { return Qt.point(px, py + y) }
     onPressed: function(m) {
       trailCanvas.begin()
       path = [[m.x, m.y + y]]
-      dist = 0; swiping = false; altsShown = false
+      dist = 0; swiping = false; altsShown = false; flicking = false
       pressPos = Qt.point(m.x, m.y)
       pressDef = root.keyDefAt(m.x, m.y + y)
       root.overlayPressedDef = pressDef
@@ -506,6 +519,19 @@ Rectangle {
       var last = path[path.length - 1]
       dist += Math.hypot(p[0] - last[0], p[1] - last[1])
       path.push(p)
+      // A down-dominant drag on a key with alternates is a flick, not a swipe:
+      // arm the first alternate and suppress the swipe trail.
+      if (!swiping && !flicking && pressDef && pressDef.alts) {
+        var ddx = m.x - pressPos.x, ddy = m.y - pressPos.y
+        if (ddy > root.rowHeight * 0.28 && ddy > Math.abs(ddx) * 1.3) {
+          flicking = true
+          glideHold.stop(); glideRepeat.stop()
+          root.morphedId = pressDef.id
+          trailCanvas.finish()
+          return
+        }
+      }
+      if (flicking) return
       if (!swiping && dist > root.rowHeight * 0.7) {
         swiping = true
         glideHold.stop(); glideRepeat.stop()
@@ -519,20 +545,30 @@ Rectangle {
       glideHold.stop(); glideRepeat.stop()
       trailCanvas.finish()
       root.overlayPressedDef = null
-      if (swiping && pressDef && pressDef.letter) {
+      if (flicking && pressDef && pressDef.alts) {
+        root.keyAction({ kind: "text", text: pressDef.alts.charAt(0) })
+        root.morphedId = ""
+      } else if (swiping && pressDef && pressDef.letter) {
         root.swipeCaptured(path)
-      } else if (!swiping && pressDef && !altsShown) {
-        root.pressKey(pressDef)
+      } else if (!swiping && pressDef) {
+        if (root.isMorphKey(pressDef)) {
+          if (root.morphedId === pressDef.id) { root.keyAction({ kind: "text", text: pressDef.alts.charAt(0) }); root.morphedId = "" }
+          else root.pressKey(pressDef)
+        } else if (!altsShown) {
+          root.pressKey(pressDef)
+        }
       }
       pressDef = null
     }
-    onCanceled: { glideHold.stop(); glideRepeat.stop(); trailCanvas.finish(); root.overlayPressedDef = null; pressDef = null }
+    onCanceled: { glideHold.stop(); glideRepeat.stop(); trailCanvas.finish(); root.overlayPressedDef = null; root.morphedId = ""; flicking = false; pressDef = null }
     Timer {
       id: glideHold
       interval: 380
       onTriggered: {
         if (glide.swiping || !glide.pressDef) return
-        if (glide.pressDef.alts) {
+        if (root.isMorphKey(glide.pressDef)) {
+          root.morphedId = glide.pressDef.id
+        } else if (glide.pressDef.alts) {
           glide.altsShown = true
           root.openAltsAt(glide.localToRoot(glide.pressPos.x, glide.pressPos.y), glide.pressDef, false)
         } else if (glide.pressDef.repeat) {
@@ -578,7 +614,11 @@ Rectangle {
           font.pixelSize: Math.round(root.rowHeight * 0.42)
           font.bold: true
         }
-        TapHandler { id: altTap; gesturePolicy: TapHandler.ReleaseWithinBounds; onTapped: root.pickAlt(modelData) }
+        MouseArea {
+          id: altTap
+          anchors.fill: parent
+          onPressed: function(mouse) { mouse.accepted = true; root.pickAlt(modelData) }
+        }
       }
     }
   }
@@ -862,12 +902,14 @@ Rectangle {
     readonly property bool active: isMod && root.modifierActive(def.id)
     readonly property bool isSpace: def.id === "space"
     property bool spaceDown: false
-    readonly property bool down: tap.pressed || spaceDown || root.overlayPressedDef === def
+    readonly property bool down: tap.pressed || spaceDown || (key.morphKey && morphMA.pressed) || root.overlayPressedDef === def
     // Word labels (esc, ctrl, alt, super) read better small; glyphs and characters large.
     readonly property bool wordLabel: (def.label || "").length > 2
 
     readonly property bool isGlobe: def.id === "globe"
     readonly property bool isChar: !isGap && !isSpecial && !isMod && !isSpace && def.label !== "" && def.label.length <= 2
+    readonly property bool morphKey: root.isMorphKey(def)
+    readonly property string faceText: (root.morphedId === def.id && def.alts) ? def.alts.charAt(0) : root.labelFor(def)
     opacity: isGap ? 0 : 1
     width: root.keyWidth(def.w)
     height: root.rowHeight
@@ -896,7 +938,7 @@ Rectangle {
       z: 50
       Text {
         anchors.centerIn: parent
-        text: root.labelFor(key.def)
+        text: key.faceText
         color: Color.popups.background
         font.family: Style.font.family
         font.pixelSize: Math.round(root.rowHeight * 0.5)
@@ -906,8 +948,8 @@ Rectangle {
 
     Text {
       anchors.centerIn: parent
-      text: root.labelFor(key.def)
-      color: key.active ? Color.accent : (key.isSpecial ? Util.alpha(Color.popups.text, 0.8) : Color.popups.text)
+      text: key.faceText
+      color: (key.active || root.morphedId === key.def.id) ? Color.accent : (key.isSpecial ? Util.alpha(Color.popups.text, 0.8) : Color.popups.text)
       font.family: Style.font.family
       font.pixelSize: key.wordLabel ? Math.round(root.rowHeight * 0.27) : Math.round(root.rowHeight * 0.40)
       font.bold: key.isMod
@@ -915,12 +957,35 @@ Rectangle {
 
     // Shifted symbol hint on number / punctuation keys, like a hardware cap.
     Text {
-      visible: key.def.shiftLabel !== undefined && !key.def.letter && !key.isSpecial && !key.def.sym && !root.shift
+      visible: key.def.shiftLabel !== undefined && !key.def.letter && !key.isSpecial && !key.def.sym && !root.shift && !key.morphKey
       anchors { top: parent.top; right: parent.right }
       anchors.topMargin: Style.space(3)
       anchors.rightMargin: Style.space(5)
       text: key.def.shiftLabel || ""
       color: Color.muted
+      font.family: Style.font.family
+      font.pixelSize: Math.round(root.rowHeight * 0.22)
+    }
+
+    // Alt cue. Morph keys show the single alternate in the top-right corner,
+    // iPad-style (flick down or hold to type it). Multi-alt keys show the
+    // first alternate centered above as a "hold for more" cue.
+    Text {
+      visible: key.morphKey && !(root.morphedId === key.def.id)
+      anchors { top: parent.top; right: parent.right }
+      anchors.topMargin: Style.space(3)
+      anchors.rightMargin: Style.space(5)
+      text: key.def.alts ? key.def.alts.charAt(0) : ""
+      color: Util.alpha(Color.popups.text, 0.6)
+      font.family: Style.font.family
+      font.pixelSize: Math.round(root.rowHeight * 0.22)
+    }
+    Text {
+      visible: key.hasAlts && !key.morphKey && !key.isSpecial && !key.isGap
+      anchors { top: parent.top; horizontalCenter: parent.horizontalCenter }
+      anchors.topMargin: Style.space(3)
+      text: key.def.alts ? key.def.alts.charAt(0) : ""
+      color: Util.alpha(Color.popups.text, 0.55)
       font.family: Style.font.family
       font.pixelSize: Math.round(root.rowHeight * 0.22)
     }
@@ -949,9 +1014,35 @@ Rectangle {
     // Globe key is press-and-hold aware: a tap cycles layouts (fired on release),
     // a hold opens the switcher. Every other key fires on press, as before.
     property bool globeHeld: false
+    // Morph keys (single-alt punctuation) get a dedicated MouseArea for reliable
+    // press/move/release - the same pattern the space bar uses. tap = base char,
+    // hold = morph to the alternate, flick down = alternate; all commit on lift.
+    // (A TapHandler + DragHandler pair did not cooperate here.)
+    MouseArea {
+      id: morphMA
+      anchors.fill: parent
+      enabled: key.morphKey && !key.isGap
+      property real startY: 0
+      property bool popped: false
+      onPressed: function(m) { startY = m.y; popped = false; root.morphedId = ""; morphHold.restart() }
+      onPositionChanged: function(m) {
+        if (!pressed || popped) return
+        // Downward flick: arm the first alternate (works for single- and multi-alt).
+        if (m.y - startY > root.rowHeight * 0.22) { morphHold.stop(); root.morphedId = key.def.id }
+      }
+      onReleased: function(m) {
+        morphHold.stop()
+        if (popped) { /* the chooser popup is open; the user picks from it */ }
+        else if (root.morphedId === key.def.id) root.keyAction({ kind: "text", text: key.def.alts.charAt(0) })
+        else root.pressKey(key.def)
+        if (!popped) root.morphedId = ""
+      }
+      onCanceled: { morphHold.stop(); if (!popped) root.morphedId = "" }
+    }
+
     TapHandler {
       id: tap
-      enabled: !key.isSpace && !key.isGap
+      enabled: !key.isSpace && !key.isGap && !key.morphKey
       gesturePolicy: TapHandler.WithinBounds
       onPressedChanged: {
         if (pressed) {
@@ -985,6 +1076,15 @@ Rectangle {
       id: altHold
       interval: 380
       onTriggered: root.openAlts(key, key.def)
+    }
+
+    Timer {
+      id: morphHold
+      interval: 380
+      onTriggered: {
+        if (key.def.alts && key.def.alts.length === 1) root.morphedId = key.def.id
+        else if (key.def.alts) { morphMA.popped = true; root.openAltsAt(morphMA.mapToItem(root, morphMA.width / 2, 0), key.def, false) }
+      }
     }
 
     Timer {

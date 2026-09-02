@@ -19,6 +19,9 @@ Omarchy machine with a touchscreen.
 - **Long-press accents.** Hold a key for its alternates — `é è ê`, `¿ ¡`,
   Greek tonos, Arabic hamza, `ё` — imported from AnySoftKeyboard's layout
   data plus hand-tuned sets.
+- **Flick for the alternate.** iPad-style: any key with an alternate shows it
+  in the corner; flick down (or hold) and the key morphs — `.` → `?`, `!` →
+  `¡`, `$` → `€` — and types it when you lift.
 - **Glide typing, suggestions and autocorrect.** Swipe across the letters to
   write a word (a comet trail follows your finger), tap candidates in the
   strip above the keys, and let the space bar fix typos — with per-language
@@ -151,10 +154,14 @@ and commits the best word plus a space, with runners-up in the strip. A trail
 follows your finger while you swipe. Tap-typing still works exactly as before
 — short taps stay taps.
 
-Dictionaries come from AnySoftKeyboard's language packs, one per language, and
-are downloaded automatically the first time a layout in that language becomes
-active (a few MB each, cached under `~/.config/omarchy/osk/dict/`). All nine
+Dictionaries come from AnySoftKeyboard's language packs, one per language,
+**pinned to a fixed commit and verified against an embedded SHA-256** before
+use, downloaded the first time a layout in that language becomes active (a few
+MB each; the download is size-bounded and only follows redirects within
+`githubusercontent.com`). They cache privately under
+`~/.config/omarchy/osk/dict/` (mode `0600`, written atomically). All nine
 bundled languages have one; the dictionary always follows the active layout.
+Nothing you type is uploaded.
 
 All three are toggles in the manage panel, or:
 
@@ -202,7 +209,10 @@ a clone of the lock plugin, not this one.
   Damerau-Levenshtein distance, and SHARK²-style glide decoding (the swipe
   path is resampled and scored on shape + key locations + word frequency).
   The bridge tracks the current word from the keys it injects — nothing reads
-  what other keyboards type.
+  what other keyboards type. It keeps no log of what you type: the debug mirror
+  is off unless you set `OSK_BRIDGE_LOG=1`, and even then it is a private,
+  size-capped, self-rotating file. IPC input and the suggestion strip are
+  bounded and rendered as plain text.
 
 ## Files
 

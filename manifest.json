@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "piccolo.osk",
   "name": "Piccolo on-screen keyboard",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "author": "Jorge Cohen",
   "license": "MIT",
   "description": "Touch/on-screen keyboard for the Omarchy shell (Hyprland). Glide (swipe) typing with a finger trail, suggestion strip and terminal-aware autocorrect; 22 layouts across 9 languages with iOS-style globe switching, long-press accents, split mode and key-preview bubbles; real Ctrl/Alt/Super chords via ydotool; shares its key surface with the lock screen.",

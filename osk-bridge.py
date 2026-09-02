@@ -38,6 +38,7 @@ import json
 import os
 import queue
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -84,19 +85,56 @@ VK_XML = f"""
 
 
 LOG_PATH = os.path.expanduser("~/.local/state/omarchy/osk-bridge.log")
+# The debug mirror can contain typed/preedit content, so it is OFF by default
+# and only written when OSK_BRIDGE_LOG=1 is set in the environment.
+_LOG_ENABLED = os.environ.get("OSK_BRIDGE_LOG") == "1"
+_LOG_MAX = 1024 * 1024
+
+# Bounds on everything that crosses the IPC boundary or is surfaced to the UI.
+_MAX_LINE = 64 * 1024          # one IPC line from stdin
+_MAX_TEXT = 1024               # injected text / picked word
+_MAX_KEYMAP = 256              # keymap entries
+_MAX_SWIPE_POINTS = 512        # points in one swipe path
+_MAX_SUGGEST_N = 8             # suggestions surfaced to the UI
+_MAX_SUGGEST_LEN = 64          # per-suggestion string length
+_QUEUE_MAX = 256               # pending injections
 
 
 def emit(**payload):
     line = json.dumps(payload)
     sys.stdout.write(line + "\n")
     sys.stdout.flush()
-    # Mirror to a small log so `tail -f ~/.local/state/omarchy/osk-bridge.log`
-    # shows what fcitx5 is telling us; the QML side swallows stdout otherwise.
+    if _LOG_ENABLED:
+        _debug_log(time.strftime("%H:%M:%S ") + line + "\n")
+
+
+def _debug_log(text):
+    # Opt-in only. Private (0600), never follows a symlink, refuses a file that
+    # is not a regular file we own, and self-rotates so it cannot grow unbounded.
     try:
-        with open(LOG_PATH, "a") as f:
-            f.write(time.strftime("%H:%M:%S ") + line + "\n")
+        os.makedirs(os.path.dirname(LOG_PATH), mode=0o700, exist_ok=True)
+        fd = os.open(LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+            return
+        if st.st_size > _LOG_MAX:
+            os.close(fd)
+            try:
+                os.replace(LOG_PATH, LOG_PATH + ".1")
+            except OSError:
+                pass
+            fd = os.open(LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        os.write(fd, text.encode("utf-8", "replace"))
     except OSError:
         pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 class Bridge:
@@ -109,7 +147,7 @@ class Bridge:
         self.auto_allowed = False     # may fcitx5 focus events show it right now
         self.suppress_until = 0.0     # ignore fcitx5 Show/Hide until this monotonic time
         self.last_inject = 0.0
-        self.inject_queue = queue.Queue()
+        self.inject_queue = queue.Queue(maxsize=_QUEUE_MAX)
         threading.Thread(target=self.inject_worker, daemon=True).start()
         # ---- suggestions / autocorrect / glide typing -----------------------
         self.engine = Engine(log=lambda *a: emit(event="engine", msg=" ".join(str(x) for x in a)))
@@ -171,19 +209,31 @@ class Bridge:
         self.suppress_until = time.monotonic() + 0.9
         argv = self.ydotool_text_argv(text) or self.wtype_argv({"cmd": "type", "text": text})
         if argv:
-            self.inject_queue.put(argv)
+            self._enqueue(argv)
 
     def inject_backspaces(self, n):
         if n <= 0:
             return
         self.suppress_until = time.monotonic() + 0.9
-        self.inject_queue.put(["ydotool", "key", "--key-delay", "4"] + ["14:1", "14:0"] * n)
+        self._enqueue(["ydotool", "key", "--key-delay", "4"] + ["14:1", "14:0"] * n)
+
+    def _enqueue(self, argv):
+        try:
+            self.inject_queue.put_nowait(argv)
+        except queue.Full:
+            pass  # drop under a flood rather than grow without bound
+
+    def _cap_cands(self, cands):
+        return [str(c)[:_MAX_SUGGEST_LEN] for c in list(cands)[:_MAX_SUGGEST_N]]
+
+    def _cap_args(self, args):
+        return [str(a)[:_MAX_SUGGEST_LEN] for a in list(args)[:_MAX_SUGGEST_N]]
 
     def emit_suggest(self):
         if not self.feat["suggest"]:
             return
         cands = self.engine.suggest(self.cur_word) if self.cur_word else []
-        emit(event="suggest", word=self.cur_word, cands=cands)
+        emit(event="suggest", word=self.cur_word[:_MAX_TEXT], cands=self._cap_cands(cands))
 
     def track_char(self, ch):
         """Follow what the user types; on a space, maybe autocorrect the word.
@@ -205,7 +255,7 @@ class Bridge:
                     self.inject_backspaces(len(w))
                     self.inject_text_internal(fix + " ")
                     self.last_commit = (fix, w)
-                    emit(event="autocorrected", frm=w, to=fix)
+                    emit(event="autocorrected", frm=w[:_MAX_TEXT], to=fix[:_MAX_TEXT])
                     handled = True
             if not handled and w:
                 self.last_commit = None
@@ -245,14 +295,21 @@ class Bridge:
     def do_swipe(self, path):
         if not self.feat["glide"]:
             return
-        cands = self.engine.decode_swipe([tuple(p) for p in path])
+        pts = []
+        for q in path[:_MAX_SWIPE_POINTS]:
+            if isinstance(q, (list, tuple)) and len(q) >= 2:
+                try:
+                    pts.append((float(q[0]), float(q[1])))
+                except (TypeError, ValueError):
+                    pass
+        cands = self.engine.decode_swipe(pts)
         if not cands:
             return
         lead = "" if self.cur_word == "" else " "
         self.cur_word = ""
         self.inject_text_internal(lead + cands[0] + " ")
         self.last_commit = (cands[0], None)
-        emit(event="swiped", word=cands[0], cands=cands[1:])
+        emit(event="swiped", word=str(cands[0])[:_MAX_SUGGEST_LEN], cands=self._cap_cands(cands[1:]))
 
     def after_inject(self):
         self.last_inject = time.monotonic()
@@ -319,20 +376,21 @@ class Bridge:
             if not swallow:
                 emit(event="hide")
         elif method == "UpdatePreeditArea":
-            self.preedit = args[0]
+            # Session-bus callers are unauthenticated beyond "same user": cap.
+            self.preedit = str(args[0])[:_MAX_TEXT]
             emit(event="preedit", text=self.preedit)
         elif method == "UpdatePreeditCaret":
-            emit(event="preedit", text=self.preedit, caret=args[0])
+            emit(event="preedit", text=self.preedit, caret=int(args[0]))
         elif method == "NotifyIMActivated":
-            emit(event="notify", method=method, args=list(args))
+            emit(event="notify", method=method, args=self._cap_args(args))
             if not swallow and not self.shell_has_focus():
                 emit(event="show")
         elif method == "NotifyIMDeactivated":
-            emit(event="notify", method=method, args=list(args))
+            emit(event="notify", method=method, args=self._cap_args(args))
             if not swallow:
                 emit(event="hide")
         elif method.startswith("Notify"):
-            emit(event="notify", method=method, args=list(args))
+            emit(event="notify", method=method, args=self._cap_args(args))
         # Candidate lists are irrelevant for keyboard-us.
         invocation.return_value(None)
 
@@ -467,17 +525,17 @@ class Bridge:
             if kind in ("type", "key", "char", "chord"):
                 self.suppress_until = time.monotonic() + 0.9
             if kind == "type":
-                text = cmd["text"]
+                text = str(cmd.get("text", ""))[:_MAX_TEXT]
                 if len(text) == 1 and self.track_char(text):
                     return False          # autocorrect swallowed the space and injected itself
                 argv = self.ydotool_text_argv(text) or self.wtype_argv(cmd)
                 if argv:
-                    self.inject_queue.put(argv)
+                    self._enqueue(argv)
             elif kind == "key":
                 self.track_key(cmd["name"])
                 argv = self.ydotool_named_argv(cmd["name"], cmd.get("mods", [])) or self.wtype_argv(cmd)
                 if argv:
-                    self.inject_queue.put(argv)
+                    self._enqueue(argv)
             elif kind == "char":
                 # A character with modifiers held: a chord on its US-layout key.
                 key = self.US_KEYS.get(cmd["text"])
@@ -487,13 +545,13 @@ class Bridge:
                 else:
                     argv = self.wtype_argv(cmd)
                 if argv:
-                    self.inject_queue.put(argv)
+                    self._enqueue(argv)
             elif kind == "chord":
                 self.cur_word = ""
                 self.last_commit = None
                 argv = self.ydotool_argv(cmd)
                 if argv:
-                    self.inject_queue.put(argv)
+                    self._enqueue(argv)
             elif kind == "visible":
                 self.visible = bool(cmd.get("value"))
                 self.backend_call("ProcessVisibilityEvent", GLib.Variant("(b)", (self.visible,)))
@@ -501,7 +559,9 @@ class Bridge:
                 self.engine.set_lang(cmd.get("value", "english"),
                     on_ready=lambda l, n: emit(event="dict", lang=l, words=n))
             elif kind == "keymap":
-                self.engine.set_keymap(cmd.get("keys", {}), cmd.get("unit", 60))
+                keys = cmd.get("keys", {})
+                if isinstance(keys, dict) and len(keys) <= _MAX_KEYMAP:
+                    self.engine.set_keymap(keys, cmd.get("unit", 60))
             elif kind == "features":
                 for k in ("suggest", "autocorrect", "glide"):
                     if k in cmd:
@@ -510,9 +570,11 @@ class Bridge:
             elif kind == "appclass":
                 self.app_ok = str(cmd.get("value", "")).lower() not in self.TERMINALS
             elif kind == "swipe":
-                self.do_swipe(cmd.get("path", []))
+                path = cmd.get("path", [])
+                if isinstance(path, list):
+                    self.do_swipe(path)
             elif kind == "pick":
-                self.do_pick(str(cmd.get("word", "")))
+                self.do_pick(str(cmd.get("word", ""))[:_MAX_TEXT])
             elif kind == "autoAllowed":
                 self.auto_allowed = bool(cmd.get("value"))
                 if self.auto_allowed:
@@ -526,7 +588,8 @@ class Bridge:
 
 def stdin_reader(bridge, loop):
     for line in sys.stdin:
-        GLib.idle_add(bridge.handle_command, line.strip())
+        if len(line) <= _MAX_LINE:
+            GLib.idle_add(bridge.handle_command, line.strip())
     GLib.idle_add(loop.quit)
 
 
