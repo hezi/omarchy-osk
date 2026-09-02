@@ -7,14 +7,16 @@ centers and the language; it answers three questions:
   decode_swipe(path)   -> candidate words for a glide across the letters
 
 Dictionaries are AnySoftKeyboard's AOSP wordlists (word + frequency),
-downloaded once per language into ~/.config/omarchy/osk/dict/<lang>.txt.
+downloaded once per language into ~/.config/omarchy/osk/dict/<lang>.txt
+(pinned commit, SHA-256 verified; cache handled descriptor-relatively).
 The swipe decoder is SHARK^2-shaped: prune the lexicon by the path's start /
 end keys and length, then score candidates by how closely the resampled
 finger path matches the word's ideal path through the key centers, blended
 with word frequency.
 """
-import gzip, hashlib, io, math, os, re, tempfile, threading, urllib.request, urllib.error
+import gzip, hashlib, io, math, os, re, threading, urllib.request, urllib.error
 from urllib.parse import urlsplit
+from osk_files import open_private_dir, read_regular, publish
 
 DICT_DIR = os.path.expanduser("~/.config/omarchy/osk/dict")
 
@@ -68,19 +70,6 @@ def _download_verified(url, sha, size):
         raise ValueError("digest mismatch")
     return data
 
-def _atomic_write(path, text):
-    d = os.path.dirname(path)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".osk-", suffix=".tmp")
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        try: os.unlink(tmp)
-        except OSError: pass
-        raise
-
 def _parse_combined(text):
     words = {}
     for ln in text.splitlines():
@@ -100,32 +89,47 @@ def _parse_xml(text):
     return words
 
 def fetch_dict(lang, log=lambda *_: None):
-    """Download + verify + convert one language; returns the cache path or None."""
+    """Return the cached dictionary text for `lang` (downloading, verifying and
+    converting it on first use), or None.
+
+    The cache directory is opened as a descriptor, component by component
+    (osk_files.open_private_dir), and the entry is read from an fd that was
+    checked to be a regular, owner-owned, size-bounded file - a pathname race
+    (swap to a symlink/FIFO/device after a stat) cannot reach the read.
+    """
     lang = _safe_lang(lang)
     if not lang:
         return None
-    os.makedirs(DICT_DIR, mode=0o700, exist_ok=True)
-    path = os.path.join(DICT_DIR, lang + ".txt")
-    if os.path.exists(path):
-        return path
-    subdir, fname, sha, size = SOURCES[lang]
-    url = RAW % (subdir, fname)
-    try:
-        raw = _download_verified(url, sha, size)   # exact digest+size checked first
-        if fname.endswith(".gz"):
-            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
-                raw = gz.read(_MAX_DECOMPRESSED + 1)
-            if len(raw) > _MAX_DECOMPRESSED:
-                raise ValueError("decompressed too large")
-        text = raw.decode("utf-8", "replace")
-        words = _parse_xml(text) if fname.endswith(".xml") else _parse_combined(text)
-        out = sorted(words.items(), key=lambda kv: -kv[1])[:MAX_WORDS]
-        _atomic_write(path, "".join("%s\t%d\n" % (w, fr) for w, fr in out))
-        log("dict ready", lang, len(out))
-        return path
-    except Exception as exc:
-        log("dict fetch failed", lang, str(exc))
+    dfd = open_private_dir(DICT_DIR, private=2)
+    if dfd is None:
+        log("dict dir unusable", DICT_DIR)
         return None
+    try:
+        name = lang + ".txt"
+        data = read_regular(dfd, name, _MAX_CACHE_BYTES)
+        if data is not None:
+            return data.decode("utf-8", "replace")
+        subdir, fname, sha, size = SOURCES[lang]
+        url = RAW % (subdir, fname)
+        try:
+            raw = _download_verified(url, sha, size)   # exact digest+size checked first
+            if fname.endswith(".gz"):
+                with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+                    raw = gz.read(_MAX_DECOMPRESSED + 1)
+                if len(raw) > _MAX_DECOMPRESSED:
+                    raise ValueError("decompressed too large")
+            text = raw.decode("utf-8", "replace")
+            words = _parse_xml(text) if fname.endswith(".xml") else _parse_combined(text)
+            out = sorted(words.items(), key=lambda kv: -kv[1])[:MAX_WORDS]
+            text = "".join("%s\t%d\n" % (w, fr) for w, fr in out)
+            publish(dfd, name, text.encode("utf-8"))
+            log("dict ready", lang, len(out))
+            return text
+        except Exception as exc:
+            log("dict fetch failed", lang, str(exc))
+            return None
+    finally:
+        os.close(dfd)
 
 
 class Engine:
@@ -139,28 +143,28 @@ class Engine:
         self.unit = 60.0
         self.neigh = {}          # letter -> set of adjacent letters
         self.loading = None
+        self._gen = 0                  # bumps on every set_lang; stale loads never install
+        self._load_lock = threading.Lock()
 
     # ---- dictionary ---------------------------------------------------------
     def set_lang(self, lang, on_ready=None):
         if lang == self.lang and self.words:
             return
+        self._gen += 1
+        gen = self._gen
         def work():
-            path = fetch_dict(lang, self.log)
-            if not path:
-                return
-            try:
-                if os.path.getsize(path) > _MAX_CACHE_BYTES:
-                    self.log("dict cache too large, ignoring", lang)
+            with self._load_lock:              # one loader at a time
+                if gen != self._gen:           # superseded while queued
                     return
-            except OSError:
-                return
-            words, lower, by_first = {}, {}, {}
-            with open(path, encoding="utf-8") as f:
-                for _i, ln in enumerate(f):
+                text = fetch_dict(lang, self.log)
+                if not text or gen != self._gen:
+                    return
+                words, lower, by_first = {}, {}, {}
+                for _i, ln in enumerate(text.splitlines()):
                     if _i >= _MAX_CACHE_LINES:
                         break
                     try:
-                        w, fr = ln.rstrip("\n").split("\t")
+                        w, fr = ln.split("\t")
                         fr = int(fr)
                     except ValueError:
                         continue
@@ -168,14 +172,16 @@ class Engine:
                     lw = w.lower()
                     if lw not in lower or lower[lw][1] < fr:
                         lower[lw] = (w, fr)
-            for lw, (w, fr) in lower.items():
-                by_first.setdefault(lw[0], []).append((lw, w, fr))
-            for k in by_first:
-                by_first[k].sort(key=lambda t: -t[2])
-            self.words, self.lower, self.by_first, self.lang = words, lower, by_first, lang
-            self.log("dict loaded", lang, len(lower))
-            if on_ready:
-                on_ready(lang, len(lower))
+                for lw, (w, fr) in lower.items():
+                    by_first.setdefault(lw[0], []).append((lw, w, fr))
+                for k in by_first:
+                    by_first[k].sort(key=lambda t: -t[2])
+                if gen != self._gen:           # a newer language won the race
+                    return
+                self.words, self.lower, self.by_first, self.lang = words, lower, by_first, lang
+                self.log("dict loaded", lang, len(lower))
+                if on_ready:
+                    on_ready(lang, len(lower))
         self.loading = threading.Thread(target=work, daemon=True)
         self.loading.start()
 

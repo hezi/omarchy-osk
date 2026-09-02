@@ -67,7 +67,14 @@ Item {
       bridge.sendCmd({ cmd: "appclass", value: cls })
     }
   }
-  readonly property string settingsPath: Quickshell.env("HOME") + "/.config/omarchy/osk.json"
+  // Helpers are launched by absolute path (never PATH lookup) and supervised
+  // with a failure budget: exponential backoff, and after too many crashes in
+  // a row the helper stays down until the shell is reloaded, rather than
+  // respawning every two seconds forever.
+  readonly property string pythonBin: "/usr/bin/python3"
+  readonly property string bashBin: "/bin/bash"
+  readonly property int helperMaxFailures: 8
+  function helperBackoff(failures) { return Math.min(60000, 2000 * Math.pow(2, Math.max(0, failures - 1))) }
 
   // ---- visibility state ------------------------------------------------------
   property bool imWantsKeyboard: false    // fcitx5: a text field is focused
@@ -127,7 +134,7 @@ Item {
   // setup.sh once (a state flag keeps it from repeating every shell start).
   Process {
     id: depCheck
-    command: ["bash", Qt.resolvedUrl("check-deps.sh").toString().replace(/^file:\/\//, ""), "--nag"]
+    command: [root.bashBin, Qt.resolvedUrl("check-deps.sh").toString().replace(/^file:\/\//, ""), "--nag"]
     running: true
   }
 
@@ -135,29 +142,49 @@ Item {
   // The keyboard grows a microphone key when voxtype is installed; it toggles
   // recording the same way the Pause key does in laptop mode.
   property bool dictationAvailable: false
+  property string voxtypeBin: ""          // resolved once at startup; executed by that exact path
   Process {
-    command: ["sh", "-c", "command -v voxtype >/dev/null 2>&1 && echo yes || echo no"]
+    command: [root.bashBin, "-c", "command -v voxtype 2>/dev/null || true"]
     running: true
-    stdout: SplitParser { onRead: function(line) { root.dictationAvailable = String(line).trim() === "yes" } }
+    stdout: SplitParser { onRead: function(line) {
+      var p = String(line).trim()
+      if (p.charAt(0) === "/") { root.voxtypeBin = p; root.dictationAvailable = true }
+    } }
   }
+  Process { id: dictation }
   function toggleDictation() {
-    if (dictationAvailable) Util.execArgv(["voxtype", "record", "toggle"])
+    if (dictationAvailable && voxtypeBin && !dictation.running) {
+      dictation.command = [voxtypeBin, "record", "toggle"]
+      dictation.running = true
+    }
   }
 
   // ---- bridge to fcitx5 / injectors ---------------------------------------------
   readonly property string bridgePath: Qt.resolvedUrl("osk-bridge.py").toString().replace(/^file:\/\//, "")
   property bool bridgeReady: false
 
+  property int bridgeFailures: 0
+  property bool bridgeGaveUp: false
+
   Process {
     id: bridge
-    command: ["python3", root.bridgePath]
+    command: [root.pythonBin, root.bridgePath]
     running: true
     stdinEnabled: true
     stdout: SplitParser {
       onRead: function(data) { root.onBridgeLine(data) }
     }
+    onStarted: bridgeStable.restart()
     onExited: function(code, status) {
       root.bridgeReady = false
+      bridgeStable.stop()
+      root.bridgeFailures += 1
+      if (root.bridgeFailures > root.helperMaxFailures) {
+        if (!root.bridgeGaveUp) console.warn("osk: bridge crashed", root.bridgeFailures, "times; giving up until the shell reloads")
+        root.bridgeGaveUp = true
+        return
+      }
+      restartTimer.interval = root.helperBackoff(root.bridgeFailures)
       restartTimer.restart()
     }
     function sendCmd(obj) {
@@ -169,6 +196,12 @@ Item {
     id: restartTimer
     interval: 2000
     onTriggered: bridge.running = true
+  }
+  // A bridge that stays up this long is healthy: forget earlier crashes.
+  Timer {
+    id: bridgeStable
+    interval: 30000
+    onTriggered: root.bridgeFailures = 0
   }
 
   function onBridgeLine(line) {
@@ -205,38 +238,68 @@ Item {
     }
   }
 
-  // ---- tablet-mode state from ~/bin/tablet-mode.sh ----------------------------------
-  FileView {
-    id: tabletFile
-    path: "/tmp/tablet-mode.state"
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.tabletMode = text().trim() === "tablet"
-    onFileChanged: reload()
-  }
+  // ---- settings + tablet-mode state (osk-store.py) -----------------------------------
+  // Both files are read by a small stdlib helper - bounded, no symlink following,
+  // owner-checked, inotify-driven - instead of FileView, which slurps whatever a
+  // pathname resolves to. Settings are saved through the same process, so writes
+  // are validated against a closed schema, serialized, and replaced atomically.
+  readonly property string storePath: Qt.resolvedUrl("osk-store.py").toString().replace(/^file:\/\//, "")
+  property bool storeReady: false
+  property int storeFailures: 0
+  property bool storeGaveUp: false
+  property var pendingSave: null
 
-  // The state file may not exist yet when the shell starts, and inotify can
-  // miss a replace-by-rename; a slow poll keeps the two in sync regardless.
-  Timer {
-    interval: 2000
+  Process {
+    id: store
+    command: [root.pythonBin, root.storePath]
     running: true
-    repeat: true
-    onTriggered: tabletFile.reload()
+    stdinEnabled: true
+    stdout: SplitParser {
+      onRead: function(data) { root.onStoreLine(data) }
+    }
+    onStarted: storeStable.restart()
+    onExited: function(code, status) {
+      root.storeReady = false
+      storeStable.stop()
+      root.storeFailures += 1
+      if (root.storeFailures > root.helperMaxFailures) {
+        if (!root.storeGaveUp) console.warn("osk: store helper crashed", root.storeFailures, "times; giving up until the shell reloads")
+        root.storeGaveUp = true
+        return
+      }
+      storeRestart.interval = root.helperBackoff(root.storeFailures)
+      storeRestart.restart()
+    }
+    function send(obj) {
+      if (running) write(JSON.stringify(obj) + "\n")
+    }
+  }
+  Timer { id: storeRestart; interval: 2000; onTriggered: store.running = true }
+  Timer { id: storeStable; interval: 30000; onTriggered: root.storeFailures = 0 }
+
+  function onStoreLine(line) {
+    var msg
+    try { msg = JSON.parse(line) } catch (e) { return }
+    switch (msg.event) {
+    case "ready":
+      storeReady = true
+      if (pendingSave) { store.send({ cmd: "save", settings: pendingSave }); pendingSave = null }
+      break
+    case "settings":
+      applySettings(msg.settings)
+      break
+    case "tablet":
+      tabletMode = msg.mode === "tablet"
+      break
+    case "error":
+      console.warn("osk store:", String(msg.message).substring(0, 200))
+      break
+    }
   }
 
-  // ---- persisted settings ---------------------------------------------------------------
-  FileView {
-    id: settingsFile
-    path: root.settingsPath
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.applySettings(text())
-    onFileChanged: reload()
-  }
-
-  function applySettings(raw) {
+  function applySettings(s) {
     try {
-      var s = JSON.parse(raw)
+      if (!s || typeof s !== "object") return
       if (s.autoShow === "tablet" || s.autoShow === "always" || s.autoShow === "never") autoShow = s.autoShow
       if (typeof s.swipe === "boolean") swipeEnabled = s.swipe
       if (typeof s.layout === "string" && s.layout) keyLayout = s.layout
@@ -260,10 +323,11 @@ Item {
   }
 
   function saveSettings() {
-    var json = JSON.stringify({ autoShow: autoShow, swipe: swipeEnabled, layout: keyLayout,
+    var settings = { autoShow: autoShow, swipe: swipeEnabled, layout: keyLayout,
       enabled: enabledLayouts, keyPreview: keyPreview, split: splitKeyboard,
-      suggest: suggestOn, autocorrect: autocorrectOn, glide: glideOn }, null, 2)
-    Util.execArgv(["sh", "-c", 'printf "%s\\n" "$1" > "$2"', "_", json, settingsPath])
+      suggest: suggestOn, autocorrect: autocorrectOn, glide: glideOn }
+    if (storeReady) store.send({ cmd: "save", settings: settings })
+    else pendingSave = settings          // flushed when the helper comes up
   }
 
   // ---- IPC: omarchy-shell osk <method> -------------------------------------------------------

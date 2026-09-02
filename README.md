@@ -51,8 +51,14 @@ bash ~/.config/omarchy/plugins/piccolo.osk/setup.sh
 
 `setup.sh` installs `ydotool` (+ its user service), `wtype` and
 `python-gobject`, and — if you use keyd — excludes ydotool's virtual device so
-your injected keys aren't swallowed. The plugin also pops a one-time
-notification pointing here if it loads before the stack is present.
+your injected keys aren't swallowed. That one privileged edit
+(`/etc/keyd/default.conf`) is done by `keyd-exclude.py` as a single atomic
+rename: it keeps an exclusive backup next to the file, preserves owner/mode,
+asks keyd to reload and rolls back if keyd rejects the result, and records the
+before/after digests in `~/.local/state/omarchy/piccolo-osk-keyd.json`.
+`setup.sh --remove` removes exactly the marked block it inserted and nothing
+else. The plugin also pops a one-time notification pointing here if it loads
+before the stack is present.
 
 > Heads up: shell plugins run as unsandboxed code inside your long-lived
 > `omarchy-shell` process. Read the source before you enable it.
@@ -74,10 +80,13 @@ omarchy-shell osk setSwipe on           # bottom-edge swipe on/off
 omarchy-shell osk typeText "hello"      # inject through the keyboard's path
 ```
 
-Settings persist in `~/.config/omarchy/osk.json`. `autoShow` defaults to
-`tablet`, which only auto-shows while `/tmp/tablet-mode.state` reads `tablet`
-(written by a tablet-mode service such as the one in
-[piccolo-omarchy](https://github.com/hezi/piccolo-omarchy)). On a plain laptop,
+Settings persist in `~/.config/omarchy/osk.json` (a closed schema; unknown
+keys are dropped, the file is written atomically with mode 0600). `autoShow`
+defaults to `tablet`, which only auto-shows while
+`$XDG_RUNTIME_DIR/omarchy/tablet-mode.state` reads `tablet` (written by a
+tablet-mode service such as the one in
+[piccolo-omarchy](https://github.com/hezi/piccolo-omarchy); the directory is
+private to your session). On a plain laptop,
 set it to `always` (auto-show whenever a field is focused) or `never` (swipe /
 keybind only):
 
@@ -213,6 +222,17 @@ a clone of the lock plugin, not this one.
   is off unless you set `OSK_BRIDGE_LOG=1`, and even then it is a private,
   size-capped, self-rotating file. IPC input and the suggestion strip are
   bounded and rendered as plain text.
+- **Files and processes.** The two Python helpers are started by absolute path
+  (`/usr/bin/python3`), as are `ydotool` and `wtype`; each injector runs in
+  its own process group and is killed with all descendants if it stalls, and
+  the helpers ask the kernel to terminate them if the shell dies. A helper
+  that keeps crashing is restarted with exponential backoff and given up on
+  after eight failures rather than respawned forever. Everything the plugin
+  reads or writes on disk (settings, tablet state, dictionary cache) goes
+  through `osk_files.py`: directories are opened component by component,
+  files are read from a descriptor that was checked to be a regular,
+  owner-owned, size-bounded file (a symlink or FIFO swapped in is refused, not
+  followed), and replacements are exclusive temp file + fsync + rename.
 
 ## Files
 
@@ -222,10 +242,19 @@ KeyboardView.qml   the key surface (rows, layers, modifiers) — shareable
 KeyboardLayout.js  the two key layers
 osk-bridge.py      fcitx5 D-Bus bridge + ydotool/wtype injection + word tracking
 osk_engine.py      suggestions, autocorrect, glide decoding, dictionary fetch
+osk-store.py       settings + tablet-state store (validated, atomic, inotify)
+osk_files.py       descriptor-relative file helpers shared by the Python side
 setup.sh           one-time dependency install
+keyd-exclude.py    transactional /etc/keyd edit used by setup.sh (add/remove)
 check-deps.sh      dependency probe / first-run nag
 manifest.json      Omarchy plugin manifest
+tests/             offline unittest suite (python3 -m unittest discover -s tests -t .)
 ```
+
+The tests need no display, bus or network; they cover unterminated/oversized
+IPC, symlink/FIFO/oversized swaps of every file the plugin reads, concurrent
+language changes, orphaned injector descendants, the settings schema and
+store, and interrupted or rejected keyd edits.
 
 ## Uninstall
 

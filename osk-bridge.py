@@ -34,10 +34,12 @@ fcitx5 5.1.21), so Shift/Ctrl combos never arrive. Instead:
     only partly does, which is why wtype is not used for plain punctuation.
 Calls are serialised on one worker thread so key order is kept.
 """
+import ctypes
 import json
 import os
 import queue
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -47,6 +49,7 @@ import time
 import gi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from osk_engine import Engine
+from osk_files import read_frames
 
 gi.require_version("Gio", "2.0")
 gi.require_version("GLib", "2.0")
@@ -98,6 +101,12 @@ _MAX_SWIPE_POINTS = 512        # points in one swipe path
 _MAX_SUGGEST_N = 8             # suggestions surfaced to the UI
 _MAX_SUGGEST_LEN = 64          # per-suggestion string length
 _QUEUE_MAX = 256               # pending injections
+_MAX_PENDING = 256             # stdin lines parsed but not yet handled on the main loop
+_INJECT_TIMEOUT = 2.0          # seconds one injector may run before its whole group is killed
+
+# Injectors are packaged executables; bind their paths instead of trusting PATH.
+YDOTOOL = "/usr/bin/ydotool"
+WTYPE = "/usr/bin/wtype"
 
 
 def emit(**payload):
@@ -148,6 +157,8 @@ class Bridge:
         self.suppress_until = 0.0     # ignore fcitx5 Show/Hide until this monotonic time
         self.last_inject = 0.0
         self.inject_queue = queue.Queue(maxsize=_QUEUE_MAX)
+        self._child = None                 # in-flight injector (Popen), for cleanup
+        self._child_lock = threading.Lock()
         threading.Thread(target=self.inject_worker, daemon=True).start()
         # ---- suggestions / autocorrect / glide typing -----------------------
         self.engine = Engine(log=lambda *a: emit(event="engine", msg=" ".join(str(x) for x in a)))
@@ -215,7 +226,7 @@ class Bridge:
         if n <= 0:
             return
         self.suppress_until = time.monotonic() + 0.9
-        self._enqueue(["ydotool", "key", "--key-delay", "4"] + ["14:1", "14:0"] * n)
+        self._enqueue([YDOTOOL, "key", "--key-delay", "4"] + ["14:1", "14:0"] * n)
 
     def _enqueue(self, argv):
         try:
@@ -433,7 +444,7 @@ class Bridge:
     @staticmethod
     def wtype_argv(cmd):
         mods = [Bridge.MODS[m] for m in cmd.get("mods", []) if m in Bridge.MODS]
-        argv = ["wtype"]
+        argv = [WTYPE]
         for m in mods:
             argv += ["-M", m]
         if cmd["cmd"] == "type":
@@ -486,7 +497,7 @@ class Bridge:
                 seq += ["42:1", "%d:1" % code, "%d:0" % code, "42:0"]
             else:
                 seq += ["%d:1" % code, "%d:0" % code]
-        return ["ydotool", "key", "--key-delay", "6"] + seq
+        return [YDOTOOL, "key", "--key-delay", "6"] + seq
 
     @staticmethod
     def ydotool_named_argv(name, mods):
@@ -495,7 +506,7 @@ class Bridge:
             return None
         m = [Bridge.MOD_EVDEV[x] for x in mods if x in Bridge.MOD_EVDEV]
         seq = ["%d:1" % x for x in m] + ["%d:1" % code, "%d:0" % code] + ["%d:0" % x for x in reversed(m)]
-        return ["ydotool", "key", "--key-delay", "8"] + seq
+        return [YDOTOOL, "key", "--key-delay", "8"] + seq
 
     @staticmethod
     def ydotool_argv(cmd):
@@ -504,17 +515,45 @@ class Bridge:
         if code <= 0:
             return None
         seq = ["%d:1" % m for m in mods] + ["%d:1" % code, "%d:0" % code] + ["%d:0" % m for m in reversed(mods)]
-        return ["ydotool", "key", "--key-delay", "8"] + seq
+        return [YDOTOOL, "key", "--key-delay", "8"] + seq
 
     def inject_worker(self):
         while True:
             argv = self.inject_queue.get()
+            if argv is None:
+                return
             try:
-                subprocess.run(argv, check=False, timeout=2,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self._run_injector(argv)
             except Exception as exc:
                 emit(event="error", message=str(exc))
             GLib.idle_add(self.after_inject)
+
+    def _run_injector(self, argv):
+        """Run one injector in its own session so a timeout kills every
+        descendant (killpg), not only the direct child."""
+        p = subprocess.Popen(argv, start_new_session=True, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with self._child_lock:
+            self._child = p
+        try:
+            p.wait(timeout=_INJECT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            _killpg(p)
+            emit(event="error", message="injector timed out: %s" % argv[0])
+        finally:
+            with self._child_lock:
+                self._child = None
+
+    def shutdown(self):
+        """Stop the injector and kill any in-flight injector group."""
+        with self._child_lock:
+            p = self._child
+        if p is not None:
+            _killpg(p)
+        try:
+            self.inject_queue.put_nowait(None)
+        except queue.Full:
+            pass
 
     def handle_command(self, line):
         if not line:
@@ -586,14 +625,55 @@ class Bridge:
         return False  # one-shot idle callback
 
 
+def _killpg(p):
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        p.wait(timeout=1)
+    except Exception:
+        pass
+
+
+def _die_with_parent():
+    """Ask the kernel to SIGTERM us if the shell that spawned us disappears,
+    so an orphaned bridge (and its injector group) never lingers."""
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(1, signal.SIGTERM, 0, 0, 0)      # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
 def stdin_reader(bridge, loop):
-    for line in sys.stdin:
-        if len(line) <= _MAX_LINE:
-            GLib.idle_add(bridge.handle_command, line.strip())
+    # Lines parsed here are handed to the GLib main loop one idle callback each;
+    # the semaphore caps how many can be outstanding, so a producer faster than
+    # the main loop stalls (bounded pipe) instead of growing an unbounded queue.
+    pending = threading.BoundedSemaphore(_MAX_PENDING)
+
+    def handle(line):
+        try:
+            bridge.handle_command(line)
+        finally:
+            pending.release()
+        return False
+
+    def on_line(line):
+        if pending.acquire(timeout=5.0):
+            GLib.idle_add(handle, line)
+        else:
+            emit(event="error", message="dropped command: main loop not draining")
+
+    def on_overflow():
+        emit(event="error", message="dropped oversized IPC line")
+
+    read_frames(sys.stdin.buffer, on_line, on_overflow, _MAX_LINE)
     GLib.idle_add(loop.quit)
 
 
 def main():
+    _die_with_parent()
     bridge = Bridge()
     Gio.bus_own_name(
         Gio.BusType.SESSION, VK_NAME, Gio.BusNameOwnerFlags.REPLACE,
@@ -604,8 +684,13 @@ def main():
         bridge.on_fcitx_appeared, None,
     )
     loop = GLib.MainLoop()
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, lambda *_: (loop.quit(), False)[1])
     threading.Thread(target=stdin_reader, args=(bridge, loop), daemon=True).start()
-    loop.run()
+    try:
+        loop.run()
+    finally:
+        bridge.shutdown()
 
 
 if __name__ == "__main__":

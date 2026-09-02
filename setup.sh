@@ -26,16 +26,27 @@ say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 warn() { printf '\033[1;33m==> %s\033[0m\n' "$*"; }
 
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 KEYD=/etc/keyd/default.conf
-YDOTOOL_ID="-2333:6666"
+# Record of the one change we made to $KEYD (backup path, digests, owner/mode),
+# so --remove undoes exactly that and nothing else.
+KEYD_STATE=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/piccolo-osk-keyd.json
+
+# keyd-exclude.py edits $KEYD transactionally (exclusive backup, atomic
+# rename preserving owner/mode, keyd reload with rollback) and prints one JSON
+# line; surface it for the user.
+keyd_edit() {
+  local out
+  out=$(sudo /usr/bin/python3 "$HERE/keyd-exclude.py" "$1" "$KEYD" "$KEYD_STATE") || { warn "keyd: $out"; return 1; }
+  note "keyd: $out"
+}
 
 if [[ ${1:-} == --remove ]]; then
   say "Disabling the ydotool user service"
   systemctl --user disable --now ydotool.service 2>/dev/null || true
-  if [[ -f $KEYD ]] && grep -q -- "$YDOTOOL_ID" "$KEYD"; then
+  if [[ -f $KEYD ]]; then
     say "Removing the keyd exclusion (sudo)"
-    sudo sed -i "\|$YDOTOOL_ID|d" "$KEYD"
-    sudo keyd reload 2>/dev/null || true
+    keyd_edit remove || true
   fi
   note "Packages (ydotool, wtype, python-gobject) were left installed; remove them by hand if you want."
   note "Remove the plugin itself with: omarchy plugin remove piccolo.osk"
@@ -68,21 +79,8 @@ fi
 # must ignore ydotool's device or the keys the on-screen keyboard injects get
 # swallowed (and, in a tablet setup, silenced with the folded-back keyboard).
 if [[ -f $KEYD ]]; then
-  if grep -q -- "$YDOTOOL_ID" "$KEYD"; then
-    note "keyd already excludes the ydotool device"
-  else
-    say "Excluding the ydotool device from keyd (sudo)"
-    sudo cp "$KEYD" "$KEYD.bak.$(date +%s)"
-    sudo python3 - "$KEYD" <<'PY'
-import io, sys
-p = sys.argv[1]; s = io.open(p).read()
-add = ("[ids]\n*\n# ydotoold virtual device: keys injected by the on-screen keyboard must not\n"
-       "# be re-routed through keyd (whose virtual keyboard a tablet mode disables).\n-2333:6666\n")
-s = s.replace("[ids]\n*\n", add, 1) if "[ids]\n*\n" in s else add + "\n" + s
-io.open(p, "w").write(s)
-PY
-    sudo keyd reload 2>/dev/null || true
-  fi
+  say "Excluding the ydotool device from keyd (sudo)"
+  keyd_edit add
 else
   note "keyd is not configured on this system; nothing to exclude"
 fi
